@@ -260,15 +260,10 @@ def calculate_roostoo_order_size(usd_amount: float, coin_price: float,
 
     # For low-priced coins, use INTEGER quantities (no decimals)
     # This is required by the exchange to avoid "quantity step size error"
-    if coin_price < 0.01:
+    if coin_price < 10:
         # For coins < $0.01, use integer quantities only
         valid_amount = int(coin_amount)
         amount_precision = 0
-    elif coin_price < 0.1:
-        # For coins < $0.10, use 2 decimals
-        amount_precision = 2
-        precision_multiplier = 10 ** amount_precision
-        valid_amount = int(coin_amount * precision_multiplier) / precision_multiplier
     else:
         # For normal coins, use standard precision
         precision_multiplier = 10 ** amount_precision
