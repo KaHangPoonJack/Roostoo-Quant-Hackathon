@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment Variables (IMPORTANT: Never commit these!)
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.db-journal
+trading_data.db
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ML Models (Optional - commit if you want to share trained models)
+# Uncomment to ignore models
+# ML Training/models/
+
+# Crypto Data (Optional - large files)
+# crypto_data/
+# merged_data/
+# macro_data/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.bak
+*.backup
+
+ 
+ #   L a r g e   f i l e s   -   n o t   f o r   G i t 
+ 
+ M L   T r a i n i n g / m o d e l s / 
+ 
+ c r y p t o _ d a t a / 
+ 
+ m e r g e d _ d a t a / 
+ 
+ m a c r o _ d a t a / 
+ 
+ P r o j e c t   F i l e / M L / m o d e l s / 
+ 
+ 

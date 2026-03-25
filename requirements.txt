@@ -1,0 +1,32 @@
+# Trading Bot Requirements
+# Install with: pip install -r requirements.txt
+
+# Core Trading
+numpy
+pandas
+python-dotenv
+
+# ML Libraries
+lightgbm
+xgboost
+scikit-learn
+joblib
+
+# Data Fetching
+ccxt
+pandas_ta
+yfinance
+requests
+
+# Web Dashboard
+flask
+flask-cors
+
+# Scheduling
+schedule
+
+# Database
+# SQLite is built into Python
+
+# Utilities
+pathlib
