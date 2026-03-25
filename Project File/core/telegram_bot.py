@@ -6,20 +6,54 @@ Telegram notification functions for trading bot
 
 import urllib.parse
 import requests
+import threading
+import time
 from config.settings import TAKE_PROFIT_PCT, STOP_LOSS_PCT, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ML_CONFIDENCE_THRESHOLD
 from datetime import datetime, timezone
 
 
+# ================= TELEGRAM RATE LIMITER =================
+# Prevents Telegram API rate limits (30 messages/second)
+# Adds small delay between messages to avoid flooding
+
+class _TelegramRateLimiter:
+    """Simple rate limiter for Telegram messages"""
+    
+    def __init__(self, min_interval_seconds=0.5):
+        self.min_interval = min_interval_seconds
+        self.lock = threading.Lock()
+        self.last_message_time = 0.0
+    
+    def wait_before_send(self):
+        """Wait if necessary before sending message"""
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_message_time
+            
+            if elapsed < self.min_interval:
+                sleep_time = self.min_interval - elapsed
+                time.sleep(sleep_time)
+            
+            self.last_message_time = time.time()
+
+
+# Global Telegram rate limiter
+_telegram_rate_limiter = _TelegramRateLimiter(min_interval_seconds=0.5)
+
+
 def send_telegram_message(message: str):
-    """Send a message to your Telegram chat via bot"""
+    """Send a message to your Telegram chat via bot (with rate limiting)"""
     try:
+        # Wait to maintain minimum interval between messages
+        _telegram_rate_limiter.wait_before_send()
+        
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             'chat_id': TELEGRAM_CHAT_ID,
             'text': message,
             'parse_mode': 'HTML'  # Allows basic HTML formatting
         }
-        
+
         response = requests.post(url, data=payload, timeout=10)
         if response.status_code != 200:
             print(f"⚠️ Telegram notification failed: {response.text}")

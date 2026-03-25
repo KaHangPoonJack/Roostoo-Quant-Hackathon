@@ -269,21 +269,8 @@ def get_roostoo_account_info() -> Dict:
     return data if data else {}
 
 
-def get_roostoo_balance(ccy: str = "USD", use_cache: bool = True) -> float:
-    """
-    Get balance for a specific currency.
-    
-    Args:
-        ccy: Currency to get (default: "USD")
-        use_cache: If True, use cached balance (default). If False, fetch fresh from API.
-    
-    Returns:
-        Balance value
-    """
-    if use_cache:
-        return get_cached_balance(ccy)
-    
-    # Fresh API call (only use this when absolutely necessary)
+def get_roostoo_balance(ccy: str = "USD") -> float:
+    """Get balance for a specific currency"""
     data = get_balance()
 
     if not data:
