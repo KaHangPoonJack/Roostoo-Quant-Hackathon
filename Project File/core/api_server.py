@@ -41,10 +41,10 @@ def get_balance():
     try:
         from core.roostoo_client import get_roostoo_balance
         from config.settings import ROOSTOO_BASE_CURRENCY
-        
-        # Get USD balance
-        usd_balance = get_roostoo_balance(ROOSTOO_BASE_CURRENCY)
-        
+
+        # Get USD balance (always fetch fresh for API endpoint)
+        usd_balance = get_roostoo_balance(ROOSTOO_BASE_CURRENCY, use_cache=False)
+
         return jsonify({
             'balances': {'USD': usd_balance},
             'total_usd': usd_balance if usd_balance else 0,
@@ -55,6 +55,26 @@ def get_balance():
         return jsonify({
             'error': str(e),
             'total_usd': 0,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 500
+
+
+@app.route('/api/rate-limiter', methods=['GET'])
+def get_rate_limiter():
+    """Get Roostoo API rate limiter statistics"""
+    try:
+        from core.roostoo_client import get_rate_limiter_stats
+        
+        stats = get_rate_limiter_stats()
+        
+        return jsonify({
+            'rate_limiter': stats,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        })
+    except Exception as e:
+        print(f"❌ Rate limiter stats error: {e}")
+        return jsonify({
+            'error': str(e),
             'timestamp': datetime.now(timezone.utc).isoformat()
         }), 500
 

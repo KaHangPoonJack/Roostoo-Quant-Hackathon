@@ -81,5 +81,8 @@ crypto_data/
 merged_data/
 macro_data/
 models/
- 
- 
+Project File/ML/
+
+# RM files (Roostoo ML models) - ignore everywhere
+*.rm
+**/*.rm

@@ -14,6 +14,7 @@ from config.settings import TP_SL_ENABLED, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TP_SL
 from core.roostoo_client import (
     get_roostoo_position,
     get_roostoo_balance,
+    get_cached_balance,
     calculate_roostoo_order_size,
     place_roostoo_order,
     close_roostoo_position,
@@ -410,11 +411,18 @@ class ChandelierExit:
             pos_size, _ = get_roostoo_position(pair=self.symbol)
 
             if pos_size <= 0.001:  # No existing position
-                usdt_balance = get_roostoo_balance(ROOSTOO_BASE_CURRENCY)
+                # ✅ USE CACHED BALANCE (fetched once per candle by MultiCoinManager)
+                # This prevents 429 errors when all 25 traders check balance simultaneously
+                usdt_balance = get_cached_balance(ROOSTOO_BASE_CURRENCY)
+                
+                # Fallback: If cache not initialized yet, fetch directly (rare case at startup)
                 if usdt_balance <= 0:
-                    print("No USDT balance for entry")
-                    return
-            
+                    print("⚠️  Cache empty, fetching balance directly (startup only)...")
+                    usdt_balance = get_roostoo_balance(ROOSTOO_BASE_CURRENCY, use_cache=False)
+                    if usdt_balance <= 0:
+                        print("No USDT balance for entry")
+                        return
+
                 # Calculate position size based on available balance and current price
                 entry_value = usdt_balance * self.size
                 if current_price <= 0:

@@ -10,7 +10,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List
 from trading.coin_trader import CoinTrader
 from core.telegram_bot import send_telegram_message, send_consolidated_ml_predictions
-from config.settings import ML_MODEL_DIR
+from core.roostoo_client import refresh_balance_cache
+from config.settings import ML_MODEL_DIR, ROOSTOO_BASE_CURRENCY
 
 
 class MultiCoinManager:
@@ -234,6 +235,19 @@ class MultiCoinManager:
         """Start all coin traders in parallel"""
         print("\n🚀 STARTING ALL TRADERS\n")
 
+        # ✅ INITIALIZE BALANCE CACHE BEFORE STARTING TRADERS
+        # This ensures traders have balance data immediately when they start
+        print(f"\n💰 Initializing balance cache at startup...")
+        refresh_balance_cache(ROOSTOO_BASE_CURRENCY)
+
+        # ✅ SHOW RATE LIMITER STATUS
+        from core.roostoo_client import get_rate_limiter_stats
+        rate_stats = get_rate_limiter_stats()
+        print(f"\n🔒 RATE LIMITER ACTIVE:")
+        print(f"   Min interval: {rate_stats['min_interval']} between API calls")
+        print(f"   Max retries: 3 (with exponential backoff)")
+        print(f"   Auto-retry on 429 errors: Enabled")
+
         for symbol, trader in self.traders.items():
             trader.start()
             time.sleep(1)  # Stagger starts slightly
@@ -344,12 +358,17 @@ class MultiCoinManager:
                     sleep_seconds = (next_candle - now).total_seconds()
                     print(f"⏳ Waiting {sleep_seconds:.0f}s for next candle at {next_candle.strftime('%H:%M:%S UTC')}")
                     time.sleep(sleep_seconds)
-                    
+
+                    # ✅ REFRESH BALANCE CACHE ONCE AT START OF NEW CANDLE
+                    # This prevents 429 errors from 25 traders calling balance API simultaneously
+                    print(f"\n💰 Refreshing balance cache for new candle...")
+                    refresh_balance_cache(ROOSTOO_BASE_CURRENCY)
+
                     # Wait 90 seconds for all 25 traders to generate predictions
                     # Traders take 30-40s to start + 5-7s for ML inference each
                     print(f"⏳ Waiting 90s for all 25 traders to generate predictions...")
                     time.sleep(90)
-                    
+
                     # Collect and send predictions
                     if self.is_running:
                         print(f"\n🔮 Collecting ML predictions for all {len(self.traders)} coins...")
