@@ -75,17 +75,11 @@ temp/
 *.bak
 *.backup
 
- 
- #   L a r g e   f i l e s   -   n o t   f o r   G i t 
- 
- M L   T r a i n i n g / m o d e l s / 
- 
- c r y p t o _ d a t a / 
- 
- m e r g e d _ d a t a / 
- 
- m a c r o _ d a t a / 
- 
- P r o j e c t   F i l e / M L / m o d e l s / 
+# Large files - not for Git
+ML Training/
+crypto_data/
+merged_data/
+macro_data/
+models/
  
  
