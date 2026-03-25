@@ -238,30 +238,12 @@ class CoinTrader:
     def _trading_loop(self):
         """Main trading loop for this coin"""
         from core.utils import wait_until_next_quarter_hour
-        from core.roostoo_client import is_balance_cache_valid, refresh_balance_cache
-        from config.settings import ROOSTOO_BASE_CURRENCY
-        import time
 
         while self.is_running:
             try:
                 # Wait for next 15min candle
                 wait_until_next_quarter_hour()
-                
-                # ✅ WAIT FOR BALANCE CACHE TO BE READY (for current candle)
-                # Scheduler refreshes cache at candle start, traders wait for it
-                # This prevents 25 simultaneous API calls
-                max_wait = 10  # Wait up to 10 seconds for cache
-                waited = 0
-                while not is_balance_cache_valid() and waited < max_wait:
-                    time.sleep(0.5)
-                    waited += 0.5
-                
-                # If cache still not valid after waiting, refresh it ourselves (with lock)
-                if not is_balance_cache_valid():
-                    print(f"⚠️  Cache not ready after {max_wait}s, refreshing now...")
-                    refresh_balance_cache(ROOSTOO_BASE_CURRENCY)
-                
-                time.sleep(3)  # Wait for candle to stabilize
+                time.sleep(3)
                 
                 # Fetch latest candle
                 latest_df = self._fetch_latest_candle()
