@@ -61,6 +61,27 @@ _balance_cache = {
     'lock': threading.Lock()
 }
 
+# ================= POSITION CACHE =================
+# Cache position data for 2 seconds to prevent 429 errors
+# Used for TP/SL monitoring (frequent checks)
+
+_position_cache = {
+    'positions': {},  # {pair: (size, timestamp)}
+    'lock': threading.Lock(),
+    'last_api_call': 0.0,
+    'min_interval': 0.5  # Minimum 0.5s between position API calls
+}
+
+# ================= ENTRY POSITION CACHE =================
+# Cache ALL positions once per candle (15 min) for trade entry checks
+# Prevents 25 traders making simultaneous API calls
+
+_entry_position_cache = {
+    'positions': {},  # {pair: size}
+    'timestamp': None,
+    'lock': threading.Lock()
+}
+
 
 def refresh_balance_cache(ccy: str = "USD") -> float:
     """
@@ -124,6 +145,117 @@ def is_balance_cache_ready() -> bool:
     """Check if balance cache has been initialized"""
     global _balance_cache
     return _balance_cache['timestamp'] is not None
+
+
+def get_roostoo_position_cached(pair: str = "ETH/USD") -> Tuple[float, float]:
+    """
+    Get position with 2-second caching for TP/SL monitoring.
+    Returns cached value if < 2 seconds old, otherwise fetches fresh.
+    
+    Returns:
+        (coin_balance, avg_price)
+    """
+    global _position_cache
+    
+    import time
+    current_time = time.time()
+    
+    with _position_cache['lock']:
+        # Check if we have recent cached data (< 2 seconds)
+        if pair in _position_cache['positions']:
+            cached_size, cached_time = _position_cache['positions'][pair]
+            if current_time - cached_time < 2.0:
+                return cached_size, 0.0
+        
+        # Need to fetch fresh data - but rate limit API calls
+        elapsed = current_time - _position_cache['last_api_call']
+        if elapsed < _position_cache['min_interval']:
+            # Too soon - return cached value even if old
+            if pair in _position_cache['positions']:
+                cached_size, _ = _position_cache['positions'][pair]
+                print(f"⏳ {pair}: Rate limit - using cached position {cached_size:.4f}")
+                return cached_size, 0.0
+            else:
+                return 0.0, 0.0
+        
+        # Fetch fresh position data
+        coin = pair.split('/')[0]
+        balance_data = get_balance()
+        
+        _position_cache['last_api_call'] = current_time
+        
+        if not balance_data:
+            return 0.0, 0.0
+        
+        wallet = balance_data.get('Wallet', {}) or balance_data.get('SpotWallet', {})
+        
+        if coin in wallet:
+            free_balance = float(wallet[coin].get('Free', 0))
+            # Cache the result
+            _position_cache['positions'][pair] = (free_balance, current_time)
+            return free_balance, 0.0
+        
+        return 0.0, 0.0
+
+
+def refresh_entry_position_cache() -> Dict[str, float]:
+    """
+    Fetch ALL positions once per candle for trade entry checks.
+    Call this ONCE at start of each candle (15 min).
+    All 25 traders then use cached values instead of individual API calls.
+    
+    Returns:
+        Dict of {pair: position_size}
+    """
+    global _entry_position_cache
+    
+    with _entry_position_cache['lock']:
+        balance_data = get_balance()
+        
+        if not balance_data:
+            print("⚠️  Failed to fetch balance for entry position cache")
+            return {}
+        
+        wallet = balance_data.get('Wallet', {}) or balance_data.get('SpotWallet', {})
+        
+        # Extract all coin positions
+        positions = {}
+        for coin, amounts in wallet.items():
+            if coin != 'USD':  # Skip USD balance
+                free_balance = float(amounts.get('Free', 0))
+                if free_balance > 0.001:  # Only track meaningful positions
+                    positions[coin] = free_balance
+        
+        _entry_position_cache['positions'] = positions
+        _entry_position_cache['timestamp'] = datetime.now(timezone.utc)
+        
+        print(f"📊 Entry position cache updated: {len(positions)} positions @ {_entry_position_cache['timestamp'].strftime('%H:%M:%S')}")
+        return positions
+
+
+def get_cached_entry_position(pair: str = "ETH/USD") -> float:
+    """
+    Get cached position for trade entry check.
+    NO API call - uses cached value from start of candle.
+    
+    Returns:
+        Position size (0 if no position or cache not ready)
+    """
+    global _entry_position_cache
+    
+    with _entry_position_cache['lock']:
+        if _entry_position_cache['timestamp'] is None:
+            print(f"⚠️  Entry position cache not ready for {pair}")
+            return 0.0
+        
+        coin = pair.split('/')[0]
+        return _entry_position_cache['positions'].get(coin, 0.0)
+
+
+def is_entry_position_cache_ready() -> bool:
+    """Check if entry position cache has been initialized"""
+    global _entry_position_cache
+    return _entry_position_cache['timestamp'] is not None
 
 
 # ================= UTILITY FUNCTIONS =================

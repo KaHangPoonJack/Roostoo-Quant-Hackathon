@@ -13,6 +13,9 @@ from config.settings import TP_SL_ENABLED, STOP_LOSS_PCT, TAKE_PROFIT_PCT, TP_SL
 # Roostoo Broker Imports (TRADING)
 from core.roostoo_client import (
     get_roostoo_position,
+    get_roostoo_position_cached,
+    get_cached_entry_position,
+    is_entry_position_cache_ready,
     get_roostoo_balance,
     get_cached_balance,
     is_balance_cache_ready,
@@ -138,10 +141,10 @@ class ChandelierExit:
     def check_has_open_position(self):
         """Check if there's actually an open position by checking Roostoo balance"""
         try:
-            # Get actual position from Roostoo
-            pos_size, _ = get_roostoo_position(pair=self.symbol)
+            # Use CACHED position to prevent 429 errors
+            pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
             has_pos = pos_size > 0.001  # Consider it open if position > 0.001
-            print(f"🔍 Position check for {self.symbol}: Size={pos_size}, Has_Position={has_pos}")
+            print(f"🔍 Position check for {self.symbol}: Size={pos_size:.4f}, Has_Position={has_pos}")
             return has_pos
         except Exception as e:
             print(f"⚠️  Error checking position: {e}")
@@ -376,7 +379,7 @@ class ChandelierExit:
             candles_held = self.bar_count - self.entry_bar_count
             
             if candles_held >= min_hold_candles:
-                if self.buy_signal or (self.is_uptrend and in_profit):
+                if (self.buy_signal and in_profit) or (self.is_uptrend and in_profit):
                     # Avoid division by zero if entry_price is 0
                     if self.entry_price > 0:
                         final_pl_pct = ((current_price - self.entry_price) / self.entry_price) * (1 if self.position_size > 0 else -1) * 100
@@ -407,10 +410,15 @@ class ChandelierExit:
                     print(f"⏳ {self.symbol}: CE exit signal ignored (held {candles_held}/{min_hold_candles} candles)")
 
         # === ENTRY RULES (only if no position) ===
-        # Check ACTUAL balance/position instead of boolean flag
+        # Check ACTUAL position using CACHED data (from start of candle)
+        # This prevents 25 traders making simultaneous API calls
         if not self.check_has_open_position():
-            # Get position info from Roostoo instead of balance
-            pos_size, _ = get_roostoo_position(pair=self.symbol)
+            # Use CACHED entry position (fetched once per candle for ALL traders)
+            if is_entry_position_cache_ready():
+                pos_size = get_cached_entry_position(pair=self.symbol)
+            else:
+                # Fallback: fetch directly if cache not ready (startup only)
+                pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
 
             if pos_size <= 0.001:  # No existing position
                 # Use CACHED balance (fetched once per candle for all traders)
@@ -420,7 +428,7 @@ class ChandelierExit:
                 else:
                     # Fallback: fetch directly if cache not ready (startup only)
                     usdt_balance = get_roostoo_balance(ROOSTOO_BASE_CURRENCY)
-                
+
                 if usdt_balance <= 0:
                     print("No USDT balance for entry")
                     return
@@ -489,8 +497,8 @@ class ChandelierExit:
                         order_type="MARKET",
                         quantity=contract_size_str
                     )
-                    # Update position after order
-                    self.position_size, _ = get_roostoo_position(pair=self.symbol)
+                    # Update position after order (use cached to prevent 429)
+                    self.position_size, _ = get_roostoo_position_cached(pair=self.symbol)
                     if current_price > 0:
                         self.entry_price = current_price
                     else:
@@ -649,14 +657,16 @@ class ChandelierExit:
                     print(f"📊 {self.symbol} SL/TP Check | Price: ${current_price:.4f} | SL: ${self.sl_price:.4f} | TP: ${self.tp_price:.4f} | P&L: {current_pl_pct:+.2f}%")
 
                 # Get current position to check if ladder orders filled
-                current_pos_size, _ = get_roostoo_position(pair=self.symbol)
+                # Use CACHED position to prevent 429 errors
+                current_pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
 
                 # ===== TRAILING TP LADDER LOGIC =====
                 # Place LIMIT order at each TP level as price crosses it
                 # Cancel previous level's order when moving to next level
                 if TP_SL_ENABLED and self.tp_ladder_levels and self.original_position_size > 0:
                     # Get CURRENT position size (what's left to sell)
-                    current_pos_size, _ = get_roostoo_position(pair=self.symbol)
+                    # Use CACHED position to prevent 429 errors
+                    current_pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
                     
                     if current_pos_size <= 0.001:
                         # Position already closed

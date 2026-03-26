@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List
 from trading.coin_trader import CoinTrader
 from core.telegram_bot import send_telegram_message, send_consolidated_ml_predictions
-from core.roostoo_client import refresh_balance_cache
+from core.roostoo_client import refresh_balance_cache, refresh_entry_position_cache
 from config.settings import ML_MODEL_DIR, ROOSTOO_BASE_CURRENCY
 
 
@@ -353,6 +353,10 @@ class MultiCoinManager:
                     # Refresh balance cache at start of new candle (ONCE for all traders)
                     print(f"\n💰 Refreshing balance cache for new candle...")
                     refresh_balance_cache(ROOSTOO_BASE_CURRENCY)
+                    
+                    # Refresh entry position cache at start of new candle (ONCE for all traders)
+                    print(f"📊 Refreshing entry position cache for new candle...")
+                    refresh_entry_position_cache()
 
                     # Wait 90 seconds for all 25 traders to generate predictions
                     # Traders take 30-40s to start + 5-7s for ML inference each
