@@ -497,14 +497,21 @@ class ChandelierExit:
                         order_type="MARKET",
                         quantity=contract_size_str
                     )
-                    # Update position after order (use cached to prevent 429)
-                    self.position_size, _ = get_roostoo_position_cached(pair=self.symbol)
+                    
+                    # ⏳ WAIT for Roostoo to update position (market order needs time to settle)
+                    print(f"⏳ Waiting 2s for Roostoo to update position...")
+                    time.sleep(2)
+                    
+                    # Update position after order (use FRESH data, not cache)
+                    self.position_size, _ = get_roostoo_position(pair=self.symbol)
                     if current_price > 0:
                         self.entry_price = current_price
                     else:
                         print(f"⚠️ WARNING: Invalid current_price for entry! Using fallback.")
                         self.entry_price = 0.01
                     self.has_order = True
+                    
+                    print(f"✅ Position updated: {self.position_size:.4f} {self.symbol}")
 
                     # Track entry bar for time-based exit
                     self.entry_bar_count = self.bar_count
@@ -631,8 +638,18 @@ class ChandelierExit:
         if not self.binance_symbol:
             print(f"⚠️  {self.symbol}: binance_symbol not set! Cannot monitor TP/SL")
             return
-        
+
         print(f"🔍 SL/TP monitoring started for {self.symbol} | Entry: ${self.entry_price:.4f} | SL: ${self.sl_price:.4f} | TP: ${self.tp_price:.4f}")
+        
+        # First check: Use FRESH data (not cache) to ensure we have correct position
+        print(f"📊 Initial position check with fresh API call...")
+        initial_pos, _ = get_roostoo_position(pair=self.symbol)
+        print(f"   Initial position: {initial_pos:.4f} {self.symbol}")
+        
+        if initial_pos <= 0.001:
+            print(f"⚠️  WARNING: No position found after entry! Trade may have failed.")
+            self.has_order = False
+            return
         
         while not self.stop_monitoring and self.has_order:
             try:
