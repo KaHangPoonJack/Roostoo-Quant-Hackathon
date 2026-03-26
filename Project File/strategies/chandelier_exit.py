@@ -340,7 +340,7 @@ class ChandelierExit:
             candles_held = self.bar_count - self.entry_bar_count
 
             if candles_held >= min_hold_candles:
-                if self.sell_signal or (not self.is_uptrend and in_profit):
+                if (self.sell_signal and in_profit) or (not self.is_uptrend and in_profit):
                     # Avoid division by zero if entry_price is 0
                     if self.entry_price > 0:
                         final_pl_pct = ((current_price - self.entry_price) / self.entry_price) * (1 if self.position_size > 0 else -1) * 100
