@@ -51,6 +51,81 @@ class _OrderRateLimiter:
 _order_rate_limiter = _OrderRateLimiter(min_interval_seconds=1.0)
 
 
+# ================= SHARED BALANCE CACHE =================
+# Global cache to store balance fetched once per candle (15 min)
+# All traders use this shared value instead of individual API calls
+
+_balance_cache = {
+    'balance': 0.0,
+    'timestamp': None,
+    'lock': threading.Lock()
+}
+
+
+def refresh_balance_cache(ccy: str = "USD") -> float:
+    """
+    Fetch balance from Roostoo API and update shared cache.
+    Call this ONCE at start of each candle (15 min) from main loop.
+    All traders then use this cached value.
+    
+    Returns:
+        Updated balance value
+    """
+    global _balance_cache
+    
+    with _balance_cache['lock']:
+        url = f"{ROOSTOO_BASE_URL}/v3/balance"
+        headers, payload, _ = get_signed_headers({})
+        try:
+            res = requests.get(url, headers=headers, params=payload, timeout=10)
+            res.raise_for_status()
+            data = res.json()
+            
+            wallet = data.get('Wallet', {}) or data.get('SpotWallet', {})
+            if ccy in wallet:
+                free_bal = wallet[ccy].get('Free', 0)
+                balance = float(free_bal) if free_bal else 0.0
+            else:
+                balance = 0.0
+            
+            _balance_cache['balance'] = balance
+            _balance_cache['timestamp'] = datetime.now(timezone.utc)
+            
+            print(f"💰 Balance cache updated: ${balance:.2f} USD @ {_balance_cache['timestamp'].strftime('%H:%M:%S')}")
+            return balance
+            
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️  Failed to fetch balance for cache: {e}")
+            return 0.0
+
+
+def get_cached_balance(ccy: str = "USD") -> float:
+    """
+    Get cached balance (shared across all traders).
+    NO API call - uses cached value only.
+    
+    Returns:
+        Cached balance value
+    """
+    global _balance_cache
+    
+    with _balance_cache['lock']:
+        balance = _balance_cache['balance']
+        timestamp = _balance_cache['timestamp']
+        
+        if timestamp:
+            return balance
+        else:
+            print(f"⚠️  Balance cache not initialized!")
+            return 0.0
+
+
+def is_balance_cache_ready() -> bool:
+    """Check if balance cache has been initialized"""
+    global _balance_cache
+    return _balance_cache['timestamp'] is not None
+
+
 # ================= UTILITY FUNCTIONS =================
 
 def get_timestamp() -> str:
@@ -127,20 +202,6 @@ def get_ticker(pair: str = None) -> Optional[Dict]:
 
 
 # ================= SIGNED ENDPOINTS (Auth Required) =================
-
-def _get_balance_raw() -> Optional[Dict]:
-    """Get wallet balances (RCL_TopLevelCheck) - raw API call"""
-    url = f"{ROOSTOO_BASE_URL}/v3/balance"
-    headers, payload, _ = get_signed_headers({})
-    try:
-        res = requests.get(url, headers=headers, params=payload, timeout=10)
-        res.raise_for_status()
-        return res.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error getting balance: {e}")
-        print(f"Response text: {e.response.text if e.response else 'N/A'}")
-        return None
-
 
 def get_balance() -> Optional[Dict]:
     """Get wallet balances (RCL_TopLevelCheck)"""
