@@ -538,9 +538,17 @@ class ChandelierExit:
                         traceback.print_exc()
 
                     # ===== SET TAKE PROFIT & STOP LOSS (LADDER SYSTEM) =====
-                    if TP_SL_ENABLED and ml_prediction:
-                        self.predicted_class_on_entry = ml_prediction['highest_prob_class']
-                        sl_pct = STOP_LOSS_PCT.get(self.predicted_class_on_entry, 0.015)
+                    # Set SL/TP regardless of ML prediction availability
+                    if TP_SL_ENABLED:
+                        if ml_prediction:
+                            # Use ML-based SL/TP
+                            self.predicted_class_on_entry = ml_prediction['highest_prob_class']
+                            sl_pct = STOP_LOSS_PCT.get(self.predicted_class_on_entry, 0.015)
+                        else:
+                            # Fallback: Use default 1.5% SL when ML not available
+                            sl_pct = 0.015
+                            self.predicted_class_on_entry = 1
+                        
                         self.sl_price = self.entry_price * (1 - sl_pct)
 
                         # Setup LADDER TP levels - 20 levels for ALL classes (1% to 20%)
@@ -561,6 +569,8 @@ class ChandelierExit:
                         print(f"   ⚡ Using MARKET orders to ensure TP fills on reversal!")
 
                         self._start_tp_sl_monitoring()  # Start monitoring TP/SL in a separate thread
+                    else:
+                        print(f"⚠️  TP/SL is DISABLED - trading without protection!")
 
                     # Build entry message properly (avoid empty strings in HTML)
                     entry_message = f"🚀  <b>LONG POSITION OPENED</b>\n"
