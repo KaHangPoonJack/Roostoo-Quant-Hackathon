@@ -51,6 +51,7 @@ class ChandelierExit:
     def __init__(self, df, size=POSITION_SIZE_PCT, symbol=None):
         self.df = df
         self.symbol = symbol if symbol else ROOSTOO_PAIR
+        self.binance_symbol = None  # Will be set by CoinTrader (e.g., "BTCUSDT")
         self.size = size  # Fraction of available balance to use
         self.position_size = 0.0  # Track quantity (positive=long, negative=short)
         self.entry_price = 0.0
@@ -613,7 +614,7 @@ class ChandelierExit:
         while not self.stop_monitoring and self.has_order:
             try:
                 # Get REAL-TIME price from Binance (faster than Roostoo)
-                current_price = get_binance_current_price("ETHUSDT")
+                current_price = get_binance_current_price(self.binance_symbol)
 
                 if current_price <= 0:
                     time.sleep(TP_SL_CHECK_INTERVAL)

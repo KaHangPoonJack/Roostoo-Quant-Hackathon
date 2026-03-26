@@ -80,6 +80,7 @@ class CoinTrader:
             # Initialize CE strategy
             self.strategy = ChandelierExit(self.df)
             self.strategy.symbol = self.roostoo_pair  # Set symbol after init
+            self.strategy.binance_symbol = self.binance_symbol  # Set Binance symbol for TP/SL
 
             # ✅ PRE-INITIALIZE ATR (so no need to wait 22 bars)
             self._initialize_atr()
