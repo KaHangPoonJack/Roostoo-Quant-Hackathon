@@ -149,22 +149,24 @@ def is_balance_cache_ready() -> bool:
 
 def get_roostoo_position_cached(pair: str = "ETH/USD") -> Tuple[float, float]:
     """
-    Get position with 2-second caching for TP/SL monitoring.
-    Returns cached value if < 2 seconds old, otherwise fetches fresh.
+    Get position with 5-second caching for TP/SL monitoring.
+    Returns cached value if < 5 seconds old, otherwise fetches fresh.
+    
+    This reduces API calls from 750/min to ~30/min for 25 traders.
     
     Returns:
         (coin_balance, avg_price)
     """
     global _position_cache
-    
+
     import time
     current_time = time.time()
-    
+
     with _position_cache['lock']:
-        # Check if we have recent cached data (< 2 seconds)
+        # Check if we have recent cached data (< 5 seconds)
         if pair in _position_cache['positions']:
             cached_size, cached_time = _position_cache['positions'][pair]
-            if current_time - cached_time < 2.0:
+            if current_time - cached_time < 5.0:
                 return cached_size, 0.0
         
         # Need to fetch fresh data - but rate limit API calls
@@ -173,7 +175,6 @@ def get_roostoo_position_cached(pair: str = "ETH/USD") -> Tuple[float, float]:
             # Too soon - return cached value even if old
             if pair in _position_cache['positions']:
                 cached_size, _ = _position_cache['positions'][pair]
-                print(f"⏳ {pair}: Rate limit - using cached position {cached_size:.4f}")
                 return cached_size, 0.0
             else:
                 return 0.0, 0.0
@@ -191,7 +192,7 @@ def get_roostoo_position_cached(pair: str = "ETH/USD") -> Tuple[float, float]:
         
         if coin in wallet:
             free_balance = float(wallet[coin].get('Free', 0))
-            # Cache the result
+            # Cache the result for 5 seconds
             _position_cache['positions'][pair] = (free_balance, current_time)
             return free_balance, 0.0
         

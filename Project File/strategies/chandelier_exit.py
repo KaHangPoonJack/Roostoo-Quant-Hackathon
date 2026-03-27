@@ -653,19 +653,39 @@ class ChandelierExit:
             return
 
         print(f"🔍 SL/TP monitoring started for {self.symbol} | Entry: ${self.entry_price:.4f} | SL: ${self.sl_price:.4f} | TP: ${self.tp_price:.4f}")
-        
+        print(f"   Monitoring will run until position is closed or bot stops")
+
         # First check: Use FRESH data (not cache) to ensure we have correct position
         print(f"📊 Initial position check with fresh API call...")
         initial_pos, _ = get_roostoo_position(pair=self.symbol)
         print(f"   Initial position: {initial_pos:.4f} {self.symbol}")
-        
+
         if initial_pos <= 0.001:
             print(f"⚠️  WARNING: No position found after entry! Trade may have failed.")
             self.has_order = False
             return
+
+        # Track consecutive errors to detect stuck state
+        error_count = 0
+        max_errors = 5
         
-        while not self.stop_monitoring and self.has_order:
+        while not self.stop_monitoring:
             try:
+                # ALWAYS check actual position from Roostoo (not just self.has_order flag)
+                current_pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
+                
+                # If position is closed, exit monitoring
+                if current_pos_size <= 0.001:
+                    print(f"✅ Position closed detected ({current_pos_size:.4f}). Stopping monitoring.")
+                    self.has_order = False
+                    self.position_size = 0
+                    break
+                
+                # Update internal state to match reality
+                self.position_size = current_pos_size
+                if current_pos_size > 0:
+                    self.has_order = True  # Ensure flag is correct
+                
                 # Get REAL-TIME price from Binance (faster than Roostoo)
                 current_price = get_binance_current_price(self.binance_symbol)
 
@@ -682,13 +702,13 @@ class ChandelierExit:
                 else:
                     current_pl_pct = 0.0
 
-                # DEBUG: Print SL/TP status every 10 checks (20 seconds)
-                if self.bar_count % 10 == 0:
+                # DEBUG: Print SL/TP status every 6 checks (30 seconds, matches 5s cache)
+                if self.bar_count % 6 == 0:
                     print(f"📊 {self.symbol} SL/TP Check | Price: ${current_price:.4f} | SL: ${self.sl_price:.4f} | TP: ${self.tp_price:.4f} | P&L: {current_pl_pct:+.2f}%")
+                    print(f"   Position: {current_pos_size:.4f} | has_order: {self.has_order}")
 
-                # Get current position to check if ladder orders filled
-                # Use CACHED position to prevent 429 errors
-                current_pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
+                # Reset error counter on successful iteration
+                error_count = 0
 
                 # ===== TRAILING TP LADDER LOGIC (MARKET ORDERS) =====
                 # Track highest TP level reached
@@ -826,9 +846,31 @@ class ChandelierExit:
                         break
                 
                 time.sleep(TP_SL_CHECK_INTERVAL)
-                
+
             except Exception as e:
-                print(f"❌ Error in TP/SL monitoring: {e}")
+                error_count += 1
+                print(f"❌ Error in TP/SL monitoring ({error_count}/{max_errors}): {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # If too many consecutive errors, force refresh position
+                if error_count >= max_errors:
+                    print(f"⚠️  Too many errors! Force-checking position...")
+                    try:
+                        fresh_pos, _ = get_roostoo_position(pair=self.symbol)
+                        if fresh_pos <= 0.001:
+                            print(f"✅ Position actually closed. Exiting monitoring.")
+                            self.has_order = False
+                            self.position_size = 0
+                            break
+                        else:
+                            print(f"✅ Position still open ({fresh_pos:.4f}). Resetting error counter.")
+                            error_count = 0
+                            self.position_size = fresh_pos
+                            self.has_order = True
+                    except Exception as pos_error:
+                        print(f"❌ Failed to check position: {pos_error}")
+                
                 time.sleep(TP_SL_CHECK_INTERVAL)
 
     def _close_position(self, reason):
