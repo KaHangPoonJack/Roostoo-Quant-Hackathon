@@ -126,8 +126,69 @@ class CoinTrader:
                     self.strategy.entry_price = current_price
                     print(f"   Current Price: ${current_price}")
                     print(f"   Entry price unknown (spot position) - using current price")
-                
+
                 print(f"   ✅ Position recovery complete - P&L tracking resumed")
+
+                # ✅ RECOVER TP/SL SETTINGS
+                # Query database to get original trade info
+                try:
+                    from core.trading_history import history_db
+                    open_trades = history_db.get_open_trades_with_pnl()
+                    
+                    for trade in open_trades:
+                        if trade['symbol'] == self.strategy.symbol:
+                            # Recover entry price from DB if available
+                            db_entry_price = trade.get('entry_price', 0)
+                            if db_entry_price > 0:
+                                self.strategy.entry_price = db_entry_price
+                                print(f"   📊 Entry price recovered from DB: ${db_entry_price:.2f}")
+                            
+                            # Set DEFAULT SL/TP for recovered position (1.5% SL, 1% TP ladder)
+                            sl_pct = 0.015  # Default 1.5% SL
+                            self.strategy.sl_price = self.strategy.entry_price * (1 - sl_pct)
+                            self.strategy.tp_price = self.strategy.entry_price * (1 + 0.01)  # First TP at +1%
+                            
+                            # Setup TP ladder levels (1% to 20%)
+                            self.strategy.tp_ladder_levels = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                                                            0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
+                            
+                            # Initialize TP tracking
+                            self.strategy._highest_tp_reached = None
+                            self.strategy.tp_ladder_orders = {}
+                            self.strategy.original_position_size = pos_size
+                            self.strategy.current_tp_level = 0
+                            
+                            print(f"   📊 TP/SL recovered:")
+                            print(f"      Stop Loss: ${self.strategy.sl_price:.2f} (-1.5%)")
+                            print(f"      TP Levels: 1% to 20% (20 levels)")
+                            
+                            # Start TP/SL monitoring
+                            self.strategy._start_tp_sl_monitoring()
+                            print(f"   ✅ TP/SL monitoring STARTED for recovered position")
+                            break
+                    else:
+                        # No trade in DB - use current values
+                        print(f"   ⚠️  No trade record in DB - using current values")
+                        self.strategy.sl_price = self.strategy.entry_price * (1 - 0.015)
+                        self.strategy.tp_ladder_levels = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                                                        0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
+                        self.strategy._highest_tp_reached = None
+                        self.strategy.tp_ladder_orders = {}
+                        self.strategy.original_position_size = pos_size
+                        self.strategy._start_tp_sl_monitoring()
+                        print(f"   ✅ TP/SL monitoring STARTED with defaults")
+                        
+                except Exception as db_error:
+                    print(f"   ⚠️  Could not recover TP/SL from DB: {db_error}")
+                    # Set basic SL/TP anyway
+                    self.strategy.sl_price = self.strategy.entry_price * (1 - 0.015)
+                    self.strategy.tp_ladder_levels = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                                                    0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
+                    self.strategy._highest_tp_reached = None
+                    self.strategy.tp_ladder_orders = {}
+                    self.strategy.original_position_size = pos_size
+                    self.strategy._start_tp_sl_monitoring()
+                    print(f"   ✅ TP/SL monitoring STARTED with defaults (DB unavailable)")
 
                 # Send POSITION RECOVERED notification
                 send_telegram_message(
@@ -137,7 +198,9 @@ class CoinTrader:
                     f"-  Entry Price: ${avg_price:.2f}\n"
                     f"-  Current Price: ${current_price:.2f}\n"
                     f"-  Current P&L: {current_pnl:+.2f}%\n"
-                    f"-  Bot restarted - P&L tracking resumed"
+                    f"-  Stop Loss: ${self.strategy.sl_price:.2f} (-1.5%)\n"
+                    f"-  TP Levels: 1% to 20%\n"
+                    f"-  Bot restarted - TP/SL monitoring ACTIVE ✅"
                 )
 
                 # Send P&L UPDATE notification (as if it's a regular 15min update)
