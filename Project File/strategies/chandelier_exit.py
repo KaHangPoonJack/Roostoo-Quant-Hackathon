@@ -812,38 +812,55 @@ class ChandelierExit:
                         )
                         send_telegram_message(tp_message)
 
-                # CHECK STOP LOSS
+                # ===== STOP LOSS CHECK (RUNS EVERY ITERATION - HIGHEST PRIORITY) =====
+                # SL check is independent of TP ladder logic
+                # Must run EVERY time to ensure protection
                 if TP_SL_ENABLED and self.sl_price and self.sl_price > 0:
                     sl_triggered = False
-
+                    
                     if side == "LONG" and current_price <= self.sl_price:
                         sl_triggered = True
-                        print(f"🛑 SL TRIGGERED! Price ${current_price:.2f} <= SL ${self.sl_price:.2f}")
+                        print(f"🛑 SL TRIGGERED! Price ${current_price:.4f} <= SL ${self.sl_price:.4f}")
                     elif side == "SHORT" and current_price >= self.sl_price:
                         sl_triggered = True
-                        print(f"🛑 SL TRIGGERED! Price ${current_price:.2f} >= SL ${self.sl_price:.2f}")
-
+                        print(f"🛑 SL TRIGGERED! Price ${current_price:.4f} >= SL ${self.sl_price:.4f}")
+                    
                     if sl_triggered:
-                        print(f"🛑 SL triggered @ ${current_price:.2f} | P&L: {current_pl_pct:+.2f}%")
-
+                        print(f"🛑 SL triggered @ ${current_price:.4f} | P&L: {current_pl_pct:+.2f}%")
+                        
                         # CANCEL ALL PENDING TP LADDER ORDERS
                         for level_pct, order_info in list(self.tp_ladder_orders.items()):
-                            if not order_info['filled']:
+                            if order_info.get('order_id') and not order_info.get('filled'):
                                 order_id = order_info['order_id']
                                 print(f"❌ Canceling pending TP ladder order: {order_id}")
                                 cancel_roostoo_order(order_id=order_id)
                         self.tp_ladder_orders.clear()
-
+                        
                         # CLOSE REMAINING POSITION AT MARKET
                         self._close_position("Stop Loss Hit")
-                        send_sl_triggered_message(
-                            symbol=self.symbol,
-                            entry_price=self.entry_price,
-                            exit_price=current_price,
-                            pl_pct=current_pl_pct,
-                            predicted_class=self.predicted_class_on_entry or 1
-                        )
+                        
+                        # Send SL notification
+                        try:
+                            from core.telegram_bot import send_telegram_message
+                            sl_message = (
+                                f"🛑  <b>STOP LOSS TRIGGERED</b>\n"
+                                f"-  Symbol: {self.symbol}\n"
+                                f"-  Entry Price: ${self.entry_price:.4f}\n"
+                                f"-  SL Price: ${self.sl_price:.4f}\n"
+                                f"-  Exit Price: ${current_price:.4f}\n"
+                                f"-  P&L: {current_pl_pct:+.2f}%\n"
+                                f"-  Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                            )
+                            send_telegram_message(sl_message)
+                        except Exception as msg_error:
+                            print(f"⚠️  Failed to send SL notification: {msg_error}")
+                        
+                        # Exit monitoring loop
                         break
+                else:
+                    # Log if SL is not set (debugging)
+                    if self.bar_count % 30 == 0:  # Every minute
+                        print(f"⚠️  SL not active: TP_SL_ENABLED={TP_SL_ENABLED}, sl_price={self.sl_price}")
                 
                 time.sleep(TP_SL_CHECK_INTERVAL)
 
