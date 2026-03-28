@@ -134,7 +134,7 @@ class CoinTrader:
                 try:
                     from core.trading_history import history_db
                     open_trades = history_db.get_open_trades_with_pnl()
-                    
+
                     for trade in open_trades:
                         if trade['symbol'] == self.strategy.symbol:
                             # Recover entry price from DB if available
@@ -142,29 +142,55 @@ class CoinTrader:
                             if db_entry_price > 0:
                                 self.strategy.entry_price = db_entry_price
                                 print(f"   📊 Entry price recovered from DB: ${db_entry_price:.2f}")
-                            
+
                             # Set DEFAULT SL/TP for recovered position (1.5% SL, 1% TP ladder)
                             sl_pct = 0.015  # Default 1.5% SL
                             self.strategy.sl_price = self.strategy.entry_price * (1 - sl_pct)
                             self.strategy.tp_price = self.strategy.entry_price * (1 + 0.01)  # First TP at +1%
-                            
+
                             # Setup TP ladder levels (1% to 20%)
                             self.strategy.tp_ladder_levels = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
                                                             0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
-                            
+
                             # Initialize TP tracking
                             self.strategy._highest_tp_reached = None
                             self.strategy.tp_ladder_orders = {}
                             self.strategy.original_position_size = pos_size
                             self.strategy.current_tp_level = 0
+
+                            # 🔧 FIX: Set predicted_class_on_entry for recovered positions
+                            # Use class 1 as default (conservative TP/SL)
+                            self.strategy.predicted_class_on_entry = 1
+
+                            # 🔒 Initialize thread safety lock if not already done
+                            if not hasattr(self.strategy, 'tp_sl_lock'):
+                                import threading
+                                self.strategy.tp_sl_lock = threading.Lock()
                             
+                            # 🔧 CRITICAL: Ensure binance_symbol is set before starting monitoring
+                            self.strategy.binance_symbol = self.binance_symbol
+
                             print(f"   📊 TP/SL recovered:")
                             print(f"      Stop Loss: ${self.strategy.sl_price:.2f} (-1.5%)")
                             print(f"      TP Levels: 1% to 20% (20 levels)")
-                            
+
                             # Start TP/SL monitoring
                             self.strategy._start_tp_sl_monitoring()
                             print(f"   ✅ TP/SL monitoring STARTED for recovered position")
+                            
+                            # 📱 Send detailed recovery notification
+                            send_telegram_message(
+                                f"🔄 <b>POSITION RECOVERED ON RESTART</b>\n"
+                                f"-  Symbol: {self.symbol}\n"
+                                f"-  Position Size: {pos_size}\n"
+                                f"-  Entry Price: ${self.strategy.entry_price:.2f}\n"
+                                f"-  Current Price: ${current_price:.2f}\n"
+                                f"-  Current P&L: {current_pnl:+.2f}%\n"
+                                f"-  Stop Loss: ${self.strategy.sl_price:.2f} (-1.5%)\n"
+                                f"-  TP Levels: 1% to 20% (20 levels)\n"
+                                f"-  ✅ TP/SL monitoring ACTIVE\n"
+                                f"-  Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                            )
                             break
                     else:
                         # No trade in DB - use current values
@@ -175,9 +201,28 @@ class CoinTrader:
                         self.strategy._highest_tp_reached = None
                         self.strategy.tp_ladder_orders = {}
                         self.strategy.original_position_size = pos_size
+                        
+                        # 🔧 CRITICAL: Ensure binance_symbol is set before starting monitoring
+                        self.strategy.binance_symbol = self.binance_symbol
+                        
                         self.strategy._start_tp_sl_monitoring()
                         print(f"   ✅ TP/SL monitoring STARTED with defaults")
                         
+                        # 📱 Send notification for DB-less recovery
+                        send_telegram_message(
+                            f"🔄 <b>POSITION RECOVERED (No DB Record)</b>\n"
+                            f"-  Symbol: {self.symbol}\n"
+                            f"-  Position Size: {pos_size}\n"
+                            f"-  Entry Price: ${self.strategy.entry_price:.2f}\n"
+                            f"-  Current Price: ${current_price:.2f}\n"
+                            f"-  Current P&L: {current_pnl:+.2f}%\n"
+                            f"-  Stop Loss: ${self.strategy.sl_price:.2f} (-1.5%)\n"
+                            f"-  TP Levels: 1% to 20%\n"
+                            f"-  ⚠️  No DB record - using defaults\n"
+                            f"-  ✅ TP/SL monitoring ACTIVE\n"
+                            f"-  Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                        )
+
                 except Exception as db_error:
                     print(f"   ⚠️  Could not recover TP/SL from DB: {db_error}")
                     # Set basic SL/TP anyway
@@ -187,35 +232,29 @@ class CoinTrader:
                     self.strategy._highest_tp_reached = None
                     self.strategy.tp_ladder_orders = {}
                     self.strategy.original_position_size = pos_size
+                    
+                    # 🔧 CRITICAL: Ensure binance_symbol is set before starting monitoring
+                    self.strategy.binance_symbol = self.binance_symbol
+                    
                     self.strategy._start_tp_sl_monitoring()
                     print(f"   ✅ TP/SL monitoring STARTED with defaults (DB unavailable)")
+                    
+                    # 📱 Send notification for DB error recovery
+                    send_telegram_message(
+                        f"🔄 <b>POSITION RECOVERED (DB Error)</b>\n"
+                        f"-  Symbol: {self.symbol}\n"
+                        f"-  Position Size: {pos_size}\n"
+                        f"-  Entry Price: ${self.strategy.entry_price:.2f}\n"
+                        f"-  Current Price: ${current_price:.2f}\n"
+                        f"-  Current P&L: {current_pnl:+.2f}%\n"
+                        f"-  Stop Loss: ${self.strategy.sl_price:.2f} (-1.5%)\n"
+                        f"-  TP Levels: 1% to 20%\n"
+                        f"-  ⚠️  DB error - using defaults\n"
+                        f"-  ✅ TP/SL monitoring ACTIVE\n"
+                        f"-  Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                    )
+                    print(f"   ✅ TP/SL monitoring STARTED with defaults (DB unavailable)")
 
-                # Send POSITION RECOVERED notification
-                send_telegram_message(
-                    f"🔄 <b>POSITION RECOVERED ON RESTART</b>\n"
-                    f"-  Symbol: {self.symbol}\n"
-                    f"-  Position Size: {pos_size}\n"
-                    f"-  Entry Price: ${avg_price:.2f}\n"
-                    f"-  Current Price: ${current_price:.2f}\n"
-                    f"-  Current P&L: {current_pnl:+.2f}%\n"
-                    f"-  Stop Loss: ${self.strategy.sl_price:.2f} (-1.5%)\n"
-                    f"-  TP Levels: 1% to 20%\n"
-                    f"-  Bot restarted - TP/SL monitoring ACTIVE ✅"
-                )
-
-                # Send P&L UPDATE notification (as if it's a regular 15min update)
-                trend = "UPTREND" if self.strategy.is_uptrend else "DOWNTREND"
-                send_telegram_message(
-                    f"📊 <b>{self.symbol} P&L UPDATE</b>\n"
-                    f"-  Side: LONG\n"
-                    f"-  Entry: ${avg_price:.2f}\n"
-                    f"-  Current: ${current_price:.2f}\n"
-                    f"-  P&L: {current_pnl:+.2f}%\n"
-                    f"-  Supertrend: {trend}\n"
-                    f"-  Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-                )
-
-                print(f"📊 P&L update sent for recovered position")
             else:
                 print(f"🔍 {self.symbol}: No existing position found")
         except Exception as e:

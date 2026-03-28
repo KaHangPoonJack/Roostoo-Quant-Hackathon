@@ -119,7 +119,7 @@ class ChandelierExit:
         self.bar_count = 0
         self.entry_bar_count = 0  # Track which bar we entered on
         self.max_hold_candles = 20  # Maximum candles to hold trade
-        
+
         # Signal tracking counters
         self.ce_signals_count = 0  # Total CE signals generated
         self.ml_approved_count = 0  # Signals that passed ML filter
@@ -138,6 +138,13 @@ class ChandelierExit:
         # Real-time monitoring (ADD THESE)
         self.monitoring_thread = None
         self.stop_monitoring = False
+
+        # 🔒 THREAD SAFETY: Lock for TP/SL monitoring
+        self.tp_sl_lock = threading.Lock()
+        
+        # 🛡️ REVERSAL PROTECTION: Track consecutive reversal checks
+        self._reversal_confirmed_count = 0
+        self._reversal_check_needed = False
 
     def check_has_open_position(self):
         """Check if there's actually an open position by checking Roostoo balance"""
@@ -652,8 +659,16 @@ class ChandelierExit:
             print(f"⚠️  {self.symbol}: binance_symbol not set! Cannot monitor TP/SL")
             return
 
-        print(f"🔍 SL/TP monitoring started for {self.symbol} | Entry: ${self.entry_price:.4f} | SL: ${self.sl_price:.4f} | TP: ${self.tp_price:.4f}")
+        print(f"\n{'='*70}")
+        print(f"🔍 SL/TP MONITORING STARTED FOR {self.symbol}")
+        print(f"{'='*70}")
+        print(f"   Entry Price: ${self.entry_price:.4f}")
+        print(f"   Stop Loss:   ${self.sl_price:.4f} ({((self.sl_price - self.entry_price) / self.entry_price * 100):.2f}%)")
+        print(f"   TP Ladder:   {len(self.tp_ladder_levels)} levels ({self.tp_ladder_levels[0]*100:.0f}% to {self.tp_ladder_levels[-1]*100:.0f}%)")
+        print(f"   Original Size: {self.original_position_size:.4f}")
+        print(f"   predicted_class_on_entry: {self.predicted_class_on_entry}")
         print(f"   Monitoring will run until position is closed or bot stops")
+        print(f"{'='*70}\n")
 
         # First check: Use FRESH data (not cache) to ensure we have correct position
         print(f"📊 Initial position check with fresh API call...")
@@ -668,24 +683,31 @@ class ChandelierExit:
         # Track consecutive errors to detect stuck state
         error_count = 0
         max_errors = 5
-        
+
+        # 🔒 REVERSAL DETECTION: Require 2-3 consecutive confirmations
+        REVERSAL_CONFIRMATIONS_NEEDED = 2
+        self._reversal_confirmed_count = 0
+
         while not self.stop_monitoring:
             try:
-                # ALWAYS check actual position from Roostoo (not just self.has_order flag)
-                current_pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
-                
+                # 🔒 ALWAYS check actual position from Roostoo with FRESH data (not cache)
+                # This prevents issues where cache is stale during active trading
+                current_pos_size, _ = get_roostoo_position(pair=self.symbol)
+
                 # If position is closed, exit monitoring
                 if current_pos_size <= 0.001:
                     print(f"✅ Position closed detected ({current_pos_size:.4f}). Stopping monitoring.")
-                    self.has_order = False
-                    self.position_size = 0
+                    with self.tp_sl_lock:
+                        self.has_order = False
+                        self.position_size = 0
                     break
-                
-                # Update internal state to match reality
-                self.position_size = current_pos_size
-                if current_pos_size > 0:
-                    self.has_order = True  # Ensure flag is correct
-                
+
+                # 🔒 Update internal state to match reality (thread-safe)
+                with self.tp_sl_lock:
+                    self.position_size = current_pos_size
+                    if current_pos_size > 0:
+                        self.has_order = True  # Ensure flag is correct
+
                 # Get REAL-TIME price from Binance (faster than Roostoo)
                 current_price = get_binance_current_price(self.binance_symbol)
 
@@ -716,8 +738,8 @@ class ChandelierExit:
                 # This ensures TP fills on reversal, no waiting!
                 if TP_SL_ENABLED and self.tp_ladder_levels and self.original_position_size > 0:
                     # Get CURRENT position size (what's left to sell)
-                    # Use CACHED position to prevent 429 errors
-                    current_pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
+                    # Use FRESH data to ensure accuracy
+                    current_pos_size, _ = get_roostoo_position(pair=self.symbol)
 
                     if current_pos_size <= 0.001:
                         # Position already closed
@@ -727,43 +749,89 @@ class ChandelierExit:
                     # This check runs EVERY iteration, regardless of new levels
                     if hasattr(self, '_highest_tp_reached') and self._highest_tp_reached is not None:
                         highest_level_price = self.entry_price * (1 + self._highest_tp_reached)
-                        
-                        # Check for reversal (price fell below the highest TP level reached)
+
+                        # 🛡️ REVERSAL DETECTION WITH CONFIRMATION
+                        # Require 2 consecutive checks below the level to confirm reversal
                         if current_price < highest_level_price:
-                            print(f"📊 REVERSAL DETECTED! Price ${current_price:.4f} < TP Level ${highest_level_price:.4f} (+{self._highest_tp_reached*100:.0f}%)")
-                            print(f"   Selling ENTIRE position with MARKET ORDER to lock in profit!")
+                            self._reversal_confirmed_count += 1
                             
-                            # SELL EVERYTHING WITH MARKET ORDER
-                            sell_order_id = place_roostoo_order(
-                                pair=self.symbol,
-                                side="SELL",
-                                order_type="MARKET",
-                                quantity=str(current_pos_size)
-                            )
-                            
-                            if sell_order_id:
-                                print(f"✅ MARKET SELL executed! Sold {current_pos_size:.4f} {self.symbol}")
-                                
-                                # Send TP notification
-                                tp_message = (
-                                    f"📋  <b>TP REVERSAL - MARKET EXIT</b>\n"
-                                    f"-  Symbol: {self.symbol}\n"
-                                    f"-  TP Level Reached: +{self._highest_tp_reached*100:.0f}% (${highest_level_price:.4f})\n"
-                                    f"-  Reversal Price: ${current_price:.4f}\n"
-                                    f"-  P&L: {current_pl_pct:+.2f}%\n"
-                                    f"-  Size: {current_pos_size:.4f} {self.symbol} (ENTIRE POSITION)\n"
-                                    f"-  Order ID: {sell_order_id}\n"
-                                    f"-  ✅ Profit LOCKED IN with MARKET order!\n"
+                            if self._reversal_confirmed_count >= REVERSAL_CONFIRMATIONS_NEEDED:
+                                print(f"📊 REVERSAL DETECTED! Price ${current_price:.4f} < TP Level ${highest_level_price:.4f} (+{self._highest_tp_reached*100:.0f}%)")
+                                print(f"   Selling ENTIRE position with MARKET ORDER to lock in profit!")
+                                print(f"   (Confirmed after {self._reversal_confirmed_count} checks)")
+
+                                # SELL EVERYTHING WITH MARKET ORDER
+                                sell_order_id = place_roostoo_order(
+                                    pair=self.symbol,
+                                    side="SELL",
+                                    order_type="MARKET",
+                                    quantity=str(current_pos_size)
                                 )
-                                send_telegram_message(tp_message)
-                                
-                                # Mark position as closed
-                                self.has_order = False
-                                self.position_size = 0
-                                self.tp_ladder_orders.clear()
-                                break
+
+                                if sell_order_id:
+                                    print(f"✅ MARKET SELL executed! Sold {current_pos_size:.4f} {self.symbol}")
+
+                                    # Send TP notification
+                                    tp_message = (
+                                        f"📋  <b>TP REVERSAL - MARKET EXIT</b>\n"
+                                        f"-  Symbol: {self.symbol}\n"
+                                        f"-  TP Level Reached: +{self._highest_tp_reached*100:.0f}% (${highest_level_price:.4f})\n"
+                                        f"-  Reversal Price: ${current_price:.4f}\n"
+                                        f"-  P&L: {current_pl_pct:+.2f}%\n"
+                                        f"-  Size: {current_pos_size:.4f} {self.symbol} (ENTIRE POSITION)\n"
+                                        f"-  Order ID: {sell_order_id}\n"
+                                        f"-  ✅ Profit LOCKED IN with MARKET order!\n"
+                                        f"-  🔒 Confirmed after {self._reversal_confirmed_count} checks (4s)\n"
+                                    )
+                                    send_telegram_message(tp_message)
+
+                                    # Mark position as closed
+                                    with self.tp_sl_lock:
+                                        self.has_order = False
+                                        self.position_size = 0
+                                    self.tp_ladder_orders.clear()
+                                    break
+                                else:
+                                    print(f"❌ MARKET SELL failed!")
                             else:
-                                print(f"❌ MARKET SELL failed!")
+                                # Still waiting for confirmation - SEND TELEGRAM UPDATE ON FIRST CHECK
+                                print(f"⏳ Reversal detected ({self._reversal_confirmed_count}/{REVERSAL_CONFIRMATIONS_NEEDED}), waiting for confirmation...")
+                                
+                                # 📱 Send Telegram alert on first reversal detection
+                                if self._reversal_confirmed_count == 1:
+                                    try:
+                                        alert_message = (
+                                            f"⚠️  <b>TP REVERSAL WARNING</b>\n"
+                                            f"-  Symbol: {self.symbol}\n"
+                                            f"-  TP Level Reached: +{self._highest_tp_reached*100:.0f}% (${highest_level_price:.4f})\n"
+                                            f"-  Current Price: ${current_price:.4f}\n"
+                                            f"-  P&L: {current_pl_pct:+.2f}%\n"
+                                            f"-  ⏳ Waiting for confirmation (1/2 checks)...\n"
+                                            f"-  💡 Will sell if price stays below level in 2s\n"
+                                        )
+                                        send_telegram_message(alert_message)
+                                    except Exception as alert_error:
+                                        print(f"⚠️  Failed to send reversal alert: {alert_error}")
+                        else:
+                            # Price is back above the level, reset counter
+                            if self._reversal_confirmed_count > 0:
+                                print(f"✅ Price recovered above TP level, resetting reversal counter")
+                                
+                                # 📱 Send Telegram alert on recovery
+                                try:
+                                    recovery_message = (
+                                        f"✅ <b>TP REVERSAL CANCELLED</b>\n"
+                                        f"-  Symbol: {self.symbol}\n"
+                                        f"-  Price recovered above TP level (+{self._highest_tp_reached*100:.0f}%)\n"
+                                        f"-  Current Price: ${current_price:.4f}\n"
+                                        f"-  P&L: {current_pl_pct:+.2f}%\n"
+                                        f"-  ✅ Position still open - waiting for next TP level\n"
+                                    )
+                                    send_telegram_message(recovery_message)
+                                except Exception as recovery_error:
+                                    print(f"⚠️  Failed to send recovery alert: {recovery_error}")
+                                    
+                            self._reversal_confirmed_count = 0
 
                     # SECOND: Find if price crossed any NEW TP level
                     highest_crossed_level = None
@@ -817,14 +885,18 @@ class ChandelierExit:
                 # Must run EVERY time to ensure protection
                 if TP_SL_ENABLED and self.sl_price and self.sl_price > 0:
                     sl_triggered = False
-                    
+
                     if side == "LONG" and current_price <= self.sl_price:
                         sl_triggered = True
                         print(f"🛑 SL TRIGGERED! Price ${current_price:.4f} <= SL ${self.sl_price:.4f}")
+                        print(f"   Entry: ${self.entry_price:.4f} | P&L: {current_pl_pct:+.2f}%")
+                        print(f"   Position size: {current_pos_size:.4f}")
                     elif side == "SHORT" and current_price >= self.sl_price:
                         sl_triggered = True
                         print(f"🛑 SL TRIGGERED! Price ${current_price:.4f} >= SL ${self.sl_price:.4f}")
-                    
+                        print(f"   Entry: ${self.entry_price:.4f} | P&L: {current_pl_pct:+.2f}%")
+                        print(f"   Position size: {current_pos_size:.4f}")
+
                     if sl_triggered:
                         print(f"🛑 SL triggered @ ${current_price:.4f} | P&L: {current_pl_pct:+.2f}%")
                         
@@ -869,25 +941,30 @@ class ChandelierExit:
                 print(f"❌ Error in TP/SL monitoring ({error_count}/{max_errors}): {e}")
                 import traceback
                 traceback.print_exc()
-                
-                # If too many consecutive errors, force refresh position
+
+                # 🛡️ If too many consecutive errors, force refresh position
+                # But DON'T exit monitoring unless we're certain position is closed
                 if error_count >= max_errors:
-                    print(f"⚠️  Too many errors! Force-checking position...")
+                    print(f"⚠️  Too many errors! Force-checking position with FRESH API call...")
                     try:
+                        # Use FRESH data (not cache) for critical decision
                         fresh_pos, _ = get_roostoo_position(pair=self.symbol)
                         if fresh_pos <= 0.001:
                             print(f"✅ Position actually closed. Exiting monitoring.")
-                            self.has_order = False
-                            self.position_size = 0
+                            with self.tp_sl_lock:
+                                self.has_order = False
+                                self.position_size = 0
                             break
                         else:
                             print(f"✅ Position still open ({fresh_pos:.4f}). Resetting error counter.")
                             error_count = 0
-                            self.position_size = fresh_pos
-                            self.has_order = True
+                            with self.tp_sl_lock:
+                                self.position_size = fresh_pos
+                                self.has_order = True
                     except Exception as pos_error:
                         print(f"❌ Failed to check position: {pos_error}")
-                
+                        # Don't exit - keep trying on next iteration
+
                 time.sleep(TP_SL_CHECK_INTERVAL)
 
     def _close_position(self, reason):
