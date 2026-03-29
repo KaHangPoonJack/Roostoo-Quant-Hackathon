@@ -665,7 +665,14 @@ class ChandelierExit:
         print(f"🔍 SL/TP MONITORING STARTED FOR {self.symbol}")
         print(f"{'='*70}")
         print(f"   Entry Price: ${self.entry_price:.4f}")
-        print(f"   Stop Loss:   ${self.sl_price:.4f} ({((self.sl_price - self.entry_price) / self.entry_price * 100):.2f}%)")
+        
+        # 🔒 FIX: Prevent division by zero if entry_price is 0
+        if self.sl_price > 0 and self.entry_price > 0:
+            sl_pct = ((self.sl_price - self.entry_price) / self.entry_price * 100)
+            print(f"   Stop Loss:   ${self.sl_price:.4f} ({sl_pct:.2f}%)")
+        else:
+            print(f"   Stop Loss:   ${self.sl_price:.4f} (awaiting calculation)")
+        
         print(f"   TP Ladder:   {len(self.tp_ladder_levels)} levels ({self.tp_ladder_levels[0]*100:.0f}% to {self.tp_ladder_levels[-1]*100:.0f}%)")
         print(f"   Original Size: {self.original_position_size:.4f}")
         print(f"   predicted_class_on_entry: {self.predicted_class_on_entry}")
