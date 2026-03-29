@@ -30,6 +30,7 @@ from core.roostoo_client import (
 from core.binance_client import get_binance_current_price
 
 # Telegram & Utils
+from core import telegram_bot  # Import module instead of function
 from core.telegram_bot import (
     send_telegram_message,
     send_ml_prediction_message,
@@ -146,13 +147,24 @@ class ChandelierExit:
         self._reversal_confirmed_count = 0
         self._reversal_check_needed = False
 
-    def check_has_open_position(self):
-        """Check if there's actually an open position by checking Roostoo balance"""
+    def check_has_open_position(self, use_fresh_data=False):
+        """Check if there's actually an open position by checking Roostoo balance
+        
+        Args:
+            use_fresh_data: If True, fetch fresh data from API (for entry checks)
+                           If False, use cached data (for exit checks during candle)
+        """
         try:
-            # Use CACHED position to prevent 429 errors
-            pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
+            if use_fresh_data:
+                # 🔒 CRITICAL: Use FRESH data for entry checks to prevent duplicate entries
+                pos_size, _ = get_roostoo_position(pair=self.symbol)
+                print(f"🔍 Position check (FRESH) for {self.symbol}: Size={pos_size:.4f}")
+            else:
+                # Use CACHED position to prevent 429 errors (for exit checks)
+                pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
+                print(f"🔍 Position check (CACHED) for {self.symbol}: Size={pos_size:.4f}")
+            
             has_pos = pos_size > 0.001  # Consider it open if position > 0.001
-            print(f"🔍 Position check for {self.symbol}: Size={pos_size:.4f}, Has_Position={has_pos}")
             return has_pos
         except Exception as e:
             print(f"⚠️  Error checking position: {e}")
@@ -418,206 +430,195 @@ class ChandelierExit:
                     print(f"⏳ {self.symbol}: CE exit signal ignored (held {candles_held}/{min_hold_candles} candles)")
 
         # === ENTRY RULES (only if no position) ===
-        # Check ACTUAL position using CACHED data (from start of candle)
-        # This prevents 25 traders making simultaneous API calls
-        if not self.check_has_open_position():
-            # Use CACHED entry position (fetched once per candle for ALL traders)
-            if is_entry_position_cache_ready():
-                pos_size = get_cached_entry_position(pair=self.symbol)
+        # 🔒 CRITICAL: Use FRESH data (not cache) for entry check
+        # Cache can be stale after recent trade entry, causing duplicate entries
+        if not self.check_has_open_position(use_fresh_data=True):
+            # Position confirmed closed - proceed with entry logic
+            # Use CACHED balance (fetched once per candle for all traders)
+            # This prevents 429 errors from 25 traders checking balance simultaneously
+            if is_balance_cache_ready():
+                usdt_balance = get_cached_balance(ROOSTOO_BASE_CURRENCY)
             else:
                 # Fallback: fetch directly if cache not ready (startup only)
-                pos_size, _ = get_roostoo_position_cached(pair=self.symbol)
+                usdt_balance = get_roostoo_balance(ROOSTOO_BASE_CURRENCY)
 
-            if pos_size <= 0.001:  # No existing position
-                # Use CACHED balance (fetched once per candle for all traders)
-                # This prevents 429 errors from 25 traders checking balance simultaneously
-                if is_balance_cache_ready():
-                    usdt_balance = get_cached_balance(ROOSTOO_BASE_CURRENCY)
+            if usdt_balance <= 0:
+                print("No USDT balance for entry")
+                return
+
+            # Calculate position size based on available balance and current price
+            entry_value = usdt_balance * self.size
+            if current_price <= 0:
+                print(f"Invalid price: {current_price}. Skipping trade.")
+                return
+
+            # ===== ML FILTER: Get prediction before entry =====
+            # ML prediction is passed from CoinTrader via self.ml_prediction
+            ml_prediction = getattr(self, 'ml_prediction', None)
+            ml_approved = False
+            ml_position_size_pct = 0.02  # Default 2%
+
+            if ml_prediction is not None and ML_ENABLED:
+                try:
+                    # Check breakout probability sum >= 0.9
+                    ml_approved = should_trade(ml_prediction, min_breakout_probability=ML_CONFIDENCE_THRESHOLD)
+                    ml_position_size_pct = ml_prediction['position_size_pct']
+
+                    # Print detailed probability breakdown
+                    probs = ml_prediction['probabilities']
+                    breakout_prob = probs[1] + probs[2] + probs[3]
+                    print(f"🔮 ML Prediction:")
+                    print(f"   Class 0 (No Trade): {probs[0]*100:.1f}%")
+                    print(f"   Class 1 (1-3%):     {probs[1]*100:.1f}%")
+                    print(f"   Class 2 (3-5%):     {probs[2]*100:.1f}%")
+                    print(f"   Class 3 (>5%):      {probs[3]*100:.1f}%")
+                    print(f"   Breakout Sum:       {breakout_prob*100:.1f}% (threshold: 90%)")
+                    print(f"   Highest Prob Class: {ml_prediction['highest_prob_class']}")
+                    print(f"   Approved: {ml_approved}")
+                except Exception as e:
+                    print(f"⚠️  ML prediction failed: {e}")
+                    ml_approved = False
+            else:
+                ml_approved = False  # ML disabled or no prediction, use CE only
+
+            # Count CE signals (buy or sell)
+            if self.buy_signal or self.sell_signal:
+                self.ce_signals_count += 1
+                if ml_approved:
+                    self.ml_approved_count += 1
+                print(f"📊 CE Signal #{self.ce_signals_count}: Buy={self.buy_signal}, Sell={self.sell_signal}, ML_Approved={ml_approved} ({self.ml_approved_count}/{self.ce_signals_count} approved)")
+
+            # LONG: CE buy signal
+            if self.buy_signal and ml_approved:
+                self.trades_executed_count += 1
+                actual_size_pct = ml_position_size_pct if ml_prediction else self.size
+                entry_value = usdt_balance * actual_size_pct
+
+                predicted_class = ml_prediction['predicted_class'] if ml_prediction else 1
+
+                print(f"🎯 Calculated entry value: ${entry_value:.2f} of ${usdt_balance:.2f} balance")
+                contract_size_str = calculate_roostoo_order_size(
+                    usd_amount=entry_value,
+                    coin_price=current_price,
+                )
+                print(f"\n🚀 LONG ENTRY SIGNAL @ ${current_price:.2f}")
+                print(f"📊 CE Buy Signal + Supertrend Up confirmed")
+                print(f"💰 Order value: ${entry_value:.2f} ({contract_size_str} contracts)")
+                place_roostoo_order(
+                    pair=self.symbol,
+                    side="BUY",
+                    order_type="MARKET",
+                    quantity=contract_size_str
+                )
+
+                # ⏳ WAIT for Roostoo to update position (market order needs time to settle)
+                print(f"⏳ Waiting 2s for Roostoo to update position...")
+                time.sleep(2)
+
+                # Update position after order (use FRESH data, not cache)
+                self.position_size, _ = get_roostoo_position(pair=self.symbol)
+                if current_price > 0:
+                    self.entry_price = current_price
                 else:
-                    # Fallback: fetch directly if cache not ready (startup only)
-                    usdt_balance = get_roostoo_balance(ROOSTOO_BASE_CURRENCY)
+                    print(f"⚠️ WARNING: Invalid current_price for entry! Using fallback.")
+                    self.entry_price = 0.01
+                self.has_order = True
 
-                if usdt_balance <= 0:
-                    print("No USDT balance for entry")
-                    return
+                print(f"✅ Position updated: {self.position_size:.4f} {self.symbol}")
 
-                # Calculate position size based on available balance and current price
-                entry_value = usdt_balance * self.size
-                if current_price <= 0:
-                    print(f"Invalid price: {current_price}. Skipping trade.")
-                    return
+                # Track entry bar for time-based exit
+                self.entry_bar_count = self.bar_count
 
-                # ===== ML FILTER: Get prediction before entry =====
-                # ML prediction is passed from CoinTrader via self.ml_prediction
-                ml_prediction = getattr(self, 'ml_prediction', None)
-                ml_approved = False
-                ml_position_size_pct = 0.02  # Default 2%
+                # Store original position size for ladder calculations
+                self.original_position_size = self.position_size
 
-                if ml_prediction is not None and ML_ENABLED:
-                    try:
-                        # Check breakout probability sum >= 0.9
-                        ml_approved = should_trade(ml_prediction, min_breakout_probability=ML_CONFIDENCE_THRESHOLD)
-                        ml_position_size_pct = ml_prediction['position_size_pct']
+                # ✅ RECORD TRADE ENTRY TO DATABASE
+                try:
+                    from core.trading_history import history_db
+                    print(f"📝 Recording trade entry: {self.symbol} @ ${self.entry_price}")
+                    trade_id = history_db.record_trade_entry(
+                        symbol=self.symbol,
+                        entry_price=self.entry_price,
+                        side='LONG',
+                        predicted_class=ml_prediction.get('predicted_class') if ml_prediction else None,
+                        predicted_probs=ml_prediction.get('probabilities') if ml_prediction else None
+                    )
+                    print(f"📝 Trade entry recorded to database with ID: {trade_id}")
+                except Exception as e:
+                    print(f"⚠️  Failed to record trade entry: {e}")
+                    import traceback
+                    traceback.print_exc()
 
-                        # Print detailed probability breakdown
-                        probs = ml_prediction['probabilities']
-                        breakout_prob = probs[1] + probs[2] + probs[3]
-                        print(f"🔮 ML Prediction:")
-                        print(f"   Class 0 (No Trade): {probs[0]*100:.1f}%")
-                        print(f"   Class 1 (1-3%):     {probs[1]*100:.1f}%")
-                        print(f"   Class 2 (3-5%):     {probs[2]*100:.1f}%")
-                        print(f"   Class 3 (>5%):      {probs[3]*100:.1f}%")
-                        print(f"   Breakout Sum:       {breakout_prob*100:.1f}% (threshold: 90%)")
-                        print(f"   Highest Prob Class: {ml_prediction['highest_prob_class']}")
-                        print(f"   Approved: {ml_approved}")
-                    except Exception as e:
-                        print(f"⚠️  ML prediction failed: {e}")
-                        ml_approved = False
+                # ===== SET TAKE PROFIT & STOP LOSS (LADDER SYSTEM) =====
+                # Set SL/TP regardless of ML prediction availability
+                if TP_SL_ENABLED:
+                    if ml_prediction:
+                        # Use ML-based SL/TP
+                        self.predicted_class_on_entry = ml_prediction['highest_prob_class']
+                        sl_pct = STOP_LOSS_PCT.get(self.predicted_class_on_entry, 0.015)
+                    else:
+                        # Fallback: Use default 1.5% SL when ML not available
+                        sl_pct = 0.015
+                        self.predicted_class_on_entry = 1
+
+                    self.sl_price = self.entry_price * (1 - sl_pct)
+
+                    # Setup LADDER TP levels - 20 levels for ALL classes (1% to 20%)
+                    self.tp_ladder_levels = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
+                                            0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
+
+                    # Set initial TP to first level
+                    tp_pct = self.tp_ladder_levels[0]  # Store for message
+                    self.tp_price = self.entry_price * (1 + tp_pct)
+
+                    print(f"📊 TP/SL Ladder Set (20 levels - MARKET ORDERS):")
+                    print(f"   Highest Prob Class: {self.predicted_class_on_entry}")
+                    print(f"   Stop Loss: ${self.sl_price:.2f} (-{sl_pct*100:.1f}%)")
+                    print(f"   TP Ladder Levels: {[f'{l*100:.0f}%' for l in self.tp_ladder_levels]}")
+                    for i, level in enumerate(self.tp_ladder_levels, 1):
+                        tp_price_level = self.entry_price * (1 + level)
+                        print(f"   Level {i}: ${tp_price_level:.2f} (+{level*100:.0f}%)")
+                    print(f"   ⚡ Using MARKET orders to ensure TP fills on reversal!")
+
+                    self._start_tp_sl_monitoring()  # Start monitoring TP/SL in a separate thread
                 else:
-                    ml_approved = False  # ML disabled or no prediction, use CE only
+                    print(f"⚠️  TP/SL is DISABLED - trading without protection!")
 
-                # Count CE signals (buy or sell)
-                if self.buy_signal or self.sell_signal:
-                    self.ce_signals_count += 1
-                    if ml_approved:
-                        self.ml_approved_count += 1
-                    print(f"📊 CE Signal #{self.ce_signals_count}: Buy={self.buy_signal}, Sell={self.sell_signal}, ML_Approved={ml_approved} ({self.ml_approved_count}/{self.ce_signals_count} approved)")
+                # Build entry message properly (avoid empty strings in HTML)
+                entry_message = f"🚀  <b>LONG POSITION OPENED</b>\n"
+                entry_message += f"- Symbol: {self.symbol}\n"
+                entry_message += f"- Entry Price: ${current_price:.2f}\n"
+                entry_message += f"- Size: {contract_size_str} contracts\n"
+                entry_message += f"- Value: ${entry_value:.2f}\n"
+                entry_message += f"- CE Direction: {self.dir}\n"
+                entry_message += f"- Supertrend: {'UPTREND' if self.is_uptrend else 'DOWNTREND'}\n"
 
-                # LONG: CE buy signal
-                if self.buy_signal and ml_approved:
-                    self.trades_executed_count += 1
-                    actual_size_pct = ml_position_size_pct if ml_prediction else self.size
-                    entry_value = usdt_balance * actual_size_pct
+                if ml_prediction:
+                    entry_message += f"- ML Class: {ml_prediction['predicted_class']}\n"
+                    entry_message += f"- ML Confidence: {ml_prediction['confidence']*100:.1f}%\n"
+                    entry_message += f"- All Class Probabilities:\n"
+                    entry_message += f"   - Class 0: {ml_prediction['probabilities'][0]*100:.2f}%\n"
+                    entry_message += f"   - Class 1: {ml_prediction['probabilities'][1]*100:.2f}%\n"
+                    entry_message += f"   - Class 2: {ml_prediction['probabilities'][2]*100:.2f}%\n"
+                    entry_message += f"   - Class 3: {ml_prediction['probabilities'][3]*100:.2f}%\n"
 
-                    predicted_class = ml_prediction['predicted_class'] if ml_prediction else 1
+                if TP_SL_ENABLED and ml_prediction:
+                    entry_message += f"- TP/SL Settings:\n"
+                    entry_message += f"   - Take Profit: ${self.tp_price:.2f} (+{tp_pct*100:.1f}%)\n"
+                    entry_message += f"   - Stop Loss: ${self.sl_price:.2f} (-{sl_pct*100:.1f}%)\n"
 
-                    print(f"🎯 Calculated entry value: ${entry_value:.2f} of ${usdt_balance:.2f} balance")
-                    contract_size_str = calculate_roostoo_order_size(
-                        usd_amount=entry_value,
-                        coin_price=current_price,
-                    )
-                    print(f"\n🚀 LONG ENTRY SIGNAL @ ${current_price:.2f}")
-                    print(f"📊 CE Buy Signal + Supertrend Up confirmed")
-                    print(f"💰 Order value: ${entry_value:.2f} ({contract_size_str} contracts)")
-                    place_roostoo_order(
-                        pair=self.symbol,
-                        side="BUY",
-                        order_type="MARKET",
-                        quantity=contract_size_str
-                    )
-                    
-                    # ⏳ WAIT for Roostoo to update position (market order needs time to settle)
-                    print(f"⏳ Waiting 2s for Roostoo to update position...")
-                    time.sleep(2)
-                    
-                    # Update position after order (use FRESH data, not cache)
-                    self.position_size, _ = get_roostoo_position(pair=self.symbol)
-                    if current_price > 0:
-                        self.entry_price = current_price
-                    else:
-                        print(f"⚠️ WARNING: Invalid current_price for entry! Using fallback.")
-                        self.entry_price = 0.01
-                    self.has_order = True
-                    
-                    print(f"✅ Position updated: {self.position_size:.4f} {self.symbol}")
+                entry_message += f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
 
-                    # Track entry bar for time-based exit
-                    self.entry_bar_count = self.bar_count
+                send_telegram_message(entry_message)
 
-                    # Store original position size for ladder calculations
-                    self.original_position_size = self.position_size
-
-                    # ✅ RECORD TRADE ENTRY TO DATABASE
-                    try:
-                        from core.trading_history import history_db
-                        print(f"📝 Recording trade entry: {self.symbol} @ ${self.entry_price}")
-                        trade_id = history_db.record_trade_entry(
-                            symbol=self.symbol,
-                            entry_price=self.entry_price,
-                            side='LONG',
-                            predicted_class=ml_prediction.get('predicted_class') if ml_prediction else None,
-                            predicted_probs=ml_prediction.get('probabilities') if ml_prediction else None
-                        )
-                        print(f"📝 Trade entry recorded to database with ID: {trade_id}")
-                    except Exception as e:
-                        print(f"⚠️  Failed to record trade entry: {e}")
-                        import traceback
-                        traceback.print_exc()
-
-                    # ===== SET TAKE PROFIT & STOP LOSS (LADDER SYSTEM) =====
-                    # Set SL/TP regardless of ML prediction availability
-                    if TP_SL_ENABLED:
-                        if ml_prediction:
-                            # Use ML-based SL/TP
-                            self.predicted_class_on_entry = ml_prediction['highest_prob_class']
-                            sl_pct = STOP_LOSS_PCT.get(self.predicted_class_on_entry, 0.015)
-                        else:
-                            # Fallback: Use default 1.5% SL when ML not available
-                            sl_pct = 0.015
-                            self.predicted_class_on_entry = 1
-                        
-                        self.sl_price = self.entry_price * (1 - sl_pct)
-
-                        # Setup LADDER TP levels - 20 levels for ALL classes (1% to 20%)
-                        self.tp_ladder_levels = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10,
-                                                0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
-
-                        # Set initial TP to first level
-                        tp_pct = self.tp_ladder_levels[0]  # Store for message
-                        self.tp_price = self.entry_price * (1 + tp_pct)
-
-                        print(f"📊 TP/SL Ladder Set (20 levels - MARKET ORDERS):")
-                        print(f"   Highest Prob Class: {self.predicted_class_on_entry}")
-                        print(f"   Stop Loss: ${self.sl_price:.2f} (-{sl_pct*100:.1f}%)")
-                        print(f"   TP Ladder Levels: {[f'{l*100:.0f}%' for l in self.tp_ladder_levels]}")
-                        for i, level in enumerate(self.tp_ladder_levels, 1):
-                            tp_price_level = self.entry_price * (1 + level)
-                            print(f"   Level {i}: ${tp_price_level:.2f} (+{level*100:.0f}%)")
-                        print(f"   ⚡ Using MARKET orders to ensure TP fills on reversal!")
-
-                        self._start_tp_sl_monitoring()  # Start monitoring TP/SL in a separate thread
-                    else:
-                        print(f"⚠️  TP/SL is DISABLED - trading without protection!")
-
-                    # Build entry message properly (avoid empty strings in HTML)
-                    entry_message = f"🚀  <b>LONG POSITION OPENED</b>\n"
-                    entry_message += f"- Symbol: {self.symbol}\n"
-                    entry_message += f"- Entry Price: ${current_price:.2f}\n"
-                    entry_message += f"- Size: {contract_size_str} contracts\n"
-                    entry_message += f"- Value: ${entry_value:.2f}\n"
-                    entry_message += f"- CE Direction: {self.dir}\n"
-                    entry_message += f"- Supertrend: {'UPTREND' if self.is_uptrend else 'DOWNTREND'}\n"
-                    
-                    if ml_prediction:
-                        entry_message += f"- ML Class: {ml_prediction['predicted_class']}\n"
-                        entry_message += f"- ML Confidence: {ml_prediction['confidence']*100:.1f}%\n"
-                        entry_message += f"- All Class Probabilities:\n"
-                        entry_message += f"   - Class 0: {ml_prediction['probabilities'][0]*100:.2f}%\n"
-                        entry_message += f"   - Class 1: {ml_prediction['probabilities'][1]*100:.2f}%\n"
-                        entry_message += f"   - Class 2: {ml_prediction['probabilities'][2]*100:.2f}%\n"
-                        entry_message += f"   - Class 3: {ml_prediction['probabilities'][3]*100:.2f}%\n"
-                    
-                    if TP_SL_ENABLED and ml_prediction:
-                        entry_message += f"- TP/SL Settings:\n"
-                        entry_message += f"   - Take Profit: ${self.tp_price:.2f} (+{tp_pct*100:.1f}%)\n"
-                        entry_message += f"   - Stop Loss: ${self.sl_price:.2f} (-{sl_pct*100:.1f}%)\n"
-                    
-                    entry_message += f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-                    
-                    send_telegram_message(entry_message)
-
-                # SHORT: CE sell signal (CURRENTLY DISABLED - LONG ONLY)
-                elif self.sell_signal and ml_approved:
-                    print(f"⚠️  SHORT signal detected but SHORT trading is currently disabled")
-                    # SHORT trading not implemented yet
-                    # When implemented, will need to:
-                    # 1. Calculate contract_size_str for short
-                    # 2. Place short order with Roostoo
-                    # 3. Set TP/SL for short (inverse of long)
-                elif (self.buy_signal or self.sell_signal) and not ml_approved:
-                    print(f"❌ CE Signal REJECTED by ML Filter")
-                    if ml_prediction:
-                        print(f"   ML Class: {ml_prediction['predicted_class']} | Conf: {ml_prediction['confidence']*100:.1f}% | Threshold: {ML_CONFIDENCE_THRESHOLD*100:.1f}%")
+            # SHORT: CE sell signal (CURRENTLY DISABLED - LONG ONLY)
+            elif self.sell_signal and ml_approved:
+                print(f"⚠️  SHORT signal detected but SHORT trading is currently disabled")
+                # SHORT trading not implemented yet
+            elif (self.buy_signal or self.sell_signal) and not ml_approved:
+                print(f"❌ CE Signal REJECTED by ML Filter")
+                if ml_prediction:
+                    print(f"   ML Class: {ml_prediction['predicted_class']} | Conf: {ml_prediction['confidence']*100:.1f}% | Threshold: {ML_CONFIDENCE_THRESHOLD*100:.1f}%")
 
         # LIVE P&L LOGGING
         if self.has_order:
@@ -649,7 +650,8 @@ class ChandelierExit:
     def _stop_tp_sl_monitoring(self):
         """Stop real-time TP/SL monitoring thread"""
         self.stop_monitoring = True
-        if self.monitoring_thread:
+        # 🔒 FIX: Don't join thread if we're already inside it
+        if self.monitoring_thread and threading.current_thread() != self.monitoring_thread:
             self.monitoring_thread.join(timeout=5)
             print("⏹️  Real-time TP/SL monitoring stopped")
 
@@ -987,6 +989,8 @@ class ChandelierExit:
             db_path = history_db.db_path
             with sqlite3.connect(db_path) as conn:
                 cursor = conn.cursor()
+                # 🔒 FIX: Escape reason string to prevent SQL syntax errors
+                safe_reason = str(reason).replace("'", "''") if reason else "Unknown"
                 cursor.execute("""
                     UPDATE trades
                     SET exit_time = ?, exit_price = ?, pnl_pct = ?, reason = ?
@@ -997,7 +1001,7 @@ class ChandelierExit:
                     datetime.now(timezone.utc),
                     current_price,
                     final_pl_pct,
-                    reason,
+                    safe_reason,
                     self.symbol
                 ))
                 conn.commit()
