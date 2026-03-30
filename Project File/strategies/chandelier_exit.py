@@ -741,20 +741,67 @@ class ChandelierExit:
                 # Reset error counter on successful iteration
                 error_count = 0
 
+                # 🔒 CRITICAL: Always get current position size (needed for both TP ladder and SL check)
+                current_pos_size, _ = get_roostoo_position(pair=self.symbol)
+
                 # ===== TRAILING TP LADDER LOGIC (MARKET ORDERS) =====
                 # Track highest TP level reached
                 # When price reverses below that level, SELL IMMEDIATELY with MARKET order
                 # This ensures TP fills on reversal, no waiting!
                 if TP_SL_ENABLED and self.tp_ladder_levels and self.original_position_size > 0:
-                    # Get CURRENT position size (what's left to sell)
-                    # Use FRESH data to ensure accuracy
-                    current_pos_size, _ = get_roostoo_position(pair=self.symbol)
 
                     if current_pos_size <= 0.001:
                         # Position already closed
                         break
 
-                    # FIRST: Check if we have a tracked TP level and price reversed below it
+                    # FIRST: Find if price crossed any NEW TP level (MUST DO THIS BEFORE REVERSAL CHECK)
+                    highest_crossed_level = None
+                    highest_crossed_idx = -1
+
+                    for i, tp_level_pct in enumerate(self.tp_ladder_levels):
+                        tp_price_level = self.entry_price * (1 + tp_level_pct)
+
+                        # Check if price has crossed this level
+                        if side == "LONG" and current_price >= tp_price_level:
+                            # Check if we haven't tracked this level yet
+                            if tp_level_pct not in self.tp_ladder_orders or not self.tp_ladder_orders[tp_level_pct].get('tracked', False):
+                                highest_crossed_level = tp_level_pct
+                                highest_crossed_idx = i
+
+                    # If a new level was crossed, track it
+                    if highest_crossed_level is not None:
+                        # Price crossed a NEW TP level - track it
+                        print(f"📊 Price crossed TP Level {highest_crossed_idx + 1} (+{highest_crossed_level*100:.0f}%) @ ${current_price:.4f}")
+
+                        # Track this level as reached
+                        self.tp_ladder_orders[highest_crossed_level] = {
+                            'order_id': None,
+                            'placed_at': current_price,
+                            'size': current_pos_size,
+                            'tracked': True,
+                            'level_price': self.entry_price * (1 + highest_crossed_level)
+                        }
+
+                        # Store the highest level reached (for reversal detection)
+                        self._highest_tp_reached = highest_crossed_level
+
+                        self.current_tp_level = highest_crossed_idx + 1
+                        print(f"✅ TP Level {highest_crossed_idx + 1} reached - waiting for reversal to sell")
+
+                        # Send notification
+                        tp_message = (
+                            f"📋  <b>TP LEVEL REACHED</b>\n"
+                            f"-  Symbol: {self.symbol}\n"
+                            f"-  Level: {highest_crossed_idx + 1}/{len(self.tp_ladder_levels)}\n"
+                            f"-  TP Price: ${self.entry_price * (1 + highest_crossed_level):.4f} (+{highest_crossed_level*100:.0f}%)\n"
+                            f"-  Current Price: ${current_price:.4f}\n"
+                            f"-  P&L: {current_pl_pct:+.2f}%\n"
+                            f"-  ⏳ Waiting for price reversal to SELL with MARKET order...\n"
+                            f"-  💡 Will sell when price falls below this level!\n"
+                        )
+                        send_telegram_message(tp_message)
+
+                    # SECOND: Check if we have a tracked TP level and price reversed below it
                     # This check runs EVERY iteration, regardless of new levels
                     if hasattr(self, '_highest_tp_reached') and self._highest_tp_reached is not None:
                         highest_level_price = self.entry_price * (1 + self._highest_tp_reached)
@@ -841,53 +888,6 @@ class ChandelierExit:
                                     print(f"⚠️  Failed to send recovery alert: {recovery_error}")
                                     
                             self._reversal_confirmed_count = 0
-
-                    # SECOND: Find if price crossed any NEW TP level
-                    highest_crossed_level = None
-                    highest_crossed_idx = -1
-                    
-                    for i, tp_level_pct in enumerate(self.tp_ladder_levels):
-                        tp_price_level = self.entry_price * (1 + tp_level_pct)
-                        
-                        # Check if price has crossed this level
-                        if side == "LONG" and current_price >= tp_price_level:
-                            # Check if we haven't tracked this level yet
-                            if tp_level_pct not in self.tp_ladder_orders or not self.tp_ladder_orders[tp_level_pct].get('tracked', False):
-                                highest_crossed_level = tp_level_pct
-                                highest_crossed_idx = i
-
-                    # If a new level was crossed, track it
-                    if highest_crossed_level is not None:
-                        # Price crossed a NEW TP level - track it
-                        print(f"📊 Price crossed TP Level {highest_crossed_idx + 1} (+{highest_crossed_level*100:.0f}%) @ ${current_price:.4f}")
-                        
-                        # Track this level as reached
-                        self.tp_ladder_orders[highest_crossed_level] = {
-                            'order_id': None,
-                            'placed_at': current_price,
-                            'size': current_pos_size,
-                            'tracked': True,
-                            'level_price': self.entry_price * (1 + highest_crossed_level)
-                        }
-                        
-                        # Store the highest level reached (for reversal detection)
-                        self._highest_tp_reached = highest_crossed_level
-                        
-                        self.current_tp_level = highest_crossed_idx + 1
-                        print(f"✅ TP Level {highest_crossed_idx + 1} reached - waiting for reversal to sell")
-                        
-                        # Send notification
-                        tp_message = (
-                            f"📋  <b>TP LEVEL REACHED</b>\n"
-                            f"-  Symbol: {self.symbol}\n"
-                            f"-  Level: {highest_crossed_idx + 1}/{len(self.tp_ladder_levels)}\n"
-                            f"-  TP Price: ${self.entry_price * (1 + highest_crossed_level):.4f} (+{highest_crossed_level*100:.0f}%)\n"
-                            f"-  Current Price: ${current_price:.4f}\n"
-                            f"-  P&L: {current_pl_pct:+.2f}%\n"
-                            f"-  ⏳ Waiting for price reversal to SELL with MARKET order...\n"
-                            f"-  💡 Will sell when price falls below this level!\n"
-                        )
-                        send_telegram_message(tp_message)
 
                 # ===== STOP LOSS CHECK (RUNS EVERY ITERATION - HIGHEST PRIORITY) =====
                 # SL check is independent of TP ladder logic
