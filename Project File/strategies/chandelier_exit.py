@@ -67,8 +67,8 @@ class ChandelierExit:
         self.TrueRangeList = []
         self.atr_averageList = []
         self.ATR_period = 22
-        self.ATR_muti = 3.0
-        self.ATR_muti_USopen = 3.0
+        self.ATR_muti = 4
+        self.ATR_muti_USopen = 4
         self.atr = None
 
         # CE variables...
@@ -119,7 +119,7 @@ class ChandelierExit:
         # Debug
         self.bar_count = 0
         self.entry_bar_count = 0  # Track which bar we entered on
-        self.max_hold_candles = 20  # Maximum candles to hold trade
+        self.max_hold_candles = 12  # Maximum candles to hold trade (12 × 15min = 3 hours)
 
         # Signal tracking counters
         self.ce_signals_count = 0  # Total CE signals generated
@@ -310,9 +310,9 @@ class ChandelierExit:
 
         current_price = self.current_price  # Use live price for trading decisions
 
-        # === TIME-BASED EXIT (Max 20 candles) ===
+        # === TIME-BASED EXIT (Max 3 hours / 12 candles) ===
         if self.check_has_open_position() and (self.bar_count - self.entry_bar_count) >= self.max_hold_candles:
-            # Held for 20 candles, exit if not profitable enough
+            # Held for 12 candles (3 hours), exit if not profitable enough
             # Avoid division by zero if entry_price is 0 (spot position without tracked entry)
             if self.entry_price > 0:
                 current_pl_pct = ((current_price - self.entry_price) / self.entry_price) * \
