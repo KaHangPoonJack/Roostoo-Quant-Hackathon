@@ -67,8 +67,8 @@ class ChandelierExit:
         self.TrueRangeList = []
         self.atr_averageList = []
         self.ATR_period = 22
-        self.ATR_muti = 4
-        self.ATR_muti_USopen = 4
+        self.ATR_muti = 3
+        self.ATR_muti_USopen = 3
         self.atr = None
 
         # CE variables...
@@ -104,7 +104,7 @@ class ChandelierExit:
         self.tp_order_id = None
         self.sl_order_id = None
         self.tp_limit_placed = False
-        
+
         # Ladder TP tracking
         self.tp_ladder_levels = []  # List of TP levels based on class
         self.tp_ladder_orders = {}  # Dict: level_pct -> {order_id, filled, size}
@@ -146,6 +146,9 @@ class ChandelierExit:
         # 🛡️ REVERSAL PROTECTION: Track consecutive reversal checks
         self._reversal_confirmed_count = 0
         self._reversal_check_needed = False
+        
+        # 🔒 COOLDOWN FLAG: Prevent re-entry immediately after exit
+        self._exit_cooldown = 0  # Number of candles to wait after exit
 
     def check_has_open_position(self, use_fresh_data=False):
         """Check if there's actually an open position by checking Roostoo balance
@@ -313,36 +316,66 @@ class ChandelierExit:
         # === TIME-BASED EXIT (Max 3 hours / 12 candles) ===
         if self.check_has_open_position() and (self.bar_count - self.entry_bar_count) >= self.max_hold_candles:
             # Held for 12 candles (3 hours), exit if not profitable enough
-            # Avoid division by zero if entry_price is 0 (spot position without tracked entry)
-            if self.entry_price > 0:
-                current_pl_pct = ((current_price - self.entry_price) / self.entry_price) * \
-                                (1 if self.position_size > 0 else -1) * 100
+            
+            # 🔒 CRITICAL: Get ACTUAL position to determine side correctly
+            actual_pos_size, actual_avg_price = get_roostoo_position(pair=self.symbol)
+            
+            # Use Roostoo's avg_price if available, otherwise use our tracked entry_price
+            effective_entry_price = actual_avg_price if (actual_avg_price and actual_avg_price > 0) else self.entry_price
+            
+            # Calculate P&L based on ACTUAL position size (not internal state)
+            if effective_entry_price > 0:
+                # LONG position: (current - entry) / entry * 100
+                current_pl_pct = ((current_price - effective_entry_price) / effective_entry_price) * 100
             else:
                 current_pl_pct = 0.0  # Can't calculate P&L without entry price
 
             if current_pl_pct < 0.5:  # Less than 0.5% profit
-                final_pl_pct = current_pl_pct
-                if self.position_size > 0:
+                # 🔒 CRITICAL: Get ACTUAL position size before closing
+                actual_pos_size, _ = get_roostoo_position(pair=self.symbol)
+                
+                if actual_pos_size > 0.001:
+                    final_pl_pct = current_pl_pct
+                    
+                    # Close position and WAIT for confirmation
+                    print(f"⏰ TIME EXIT: Closing {actual_pos_size:.4f} {self.symbol} @ ${current_price:.2f} | P&L: {final_pl_pct:+.2f}%")
                     close_roostoo_position(pair=self.symbol, side="SELL")
+                    
+                    # ⏳ WAIT for Roostoo to update position
+                    time.sleep(2)
+                    
+                    # VERIFY position is actually closed
+                    closed_pos_size, _ = get_roostoo_position(pair=self.symbol)
+                    
+                    if closed_pos_size <= 0.001:
+                        print(f"✅ Position successfully closed")
+                    else:
+                        print(f"⚠️  WARNING: Position still open ({closed_pos_size:.4f}), trying again...")
+                        close_roostoo_position(pair=self.symbol, side="SELL")
+                        time.sleep(2)
+                    
+                    # Update internal state
+                    self.position_size = 0
+                    self.has_order = False
+                    self.entry_bar_count = 0
+                    # 🔒 COOLDOWN: Wait 2 candles (30 min) before allowing re-entry
+                    self._exit_cooldown = 1
+                    reason = f"Time Exit ({self.max_hold_candles} candles)"
+
+                    close_message = (
+                        f"⏰ <b>TIME EXIT</b>\n"
+                        f"-  Symbol: {self.symbol}\n"
+                        f"-  Reason: {reason}\n"
+                        f"-  Exit Price: ${current_price:.2f}\n"
+                        f"-  Entry Price: ${effective_entry_price:.2f}\n"
+                        f"-  P&L: {final_pl_pct:+.2f}%\n"
+                        f"-  Position Closed: ✅\n"
+                        f"-  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                    )
+                    print(f"⏰ TIME EXIT → {reason} @ ${current_price:.2f} | P&L: {final_pl_pct:+.2f}%")
+                    send_telegram_message(close_message)
                 else:
-                    close_roostoo_position(pair=self.symbol, side="BUY")
-                
-                self.position_size = 0
-                self.has_order = False
-                self.entry_bar_count = 0
-                reason = f"Time Exit ({self.max_hold_candles} candles)"
-                
-                close_message = (
-                    f"⏰ <b>TIME EXIT</b>\n"
-                    f"-  Symbol: {self.symbol}\n"
-                    f"-  Reason: {reason}\n"
-                    f"-  Exit Price: ${current_price:.2f}\n"
-                    f"-  Entry Price: ${self.entry_price:.2f}\n"
-                    f"-  P&L: {final_pl_pct:+.2f}%\n"
-                    f"-  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
-                )
-                print(f"⏰ TIME EXIT → {reason} @ {current_price:.2f} | P&L: {final_pl_pct:+.2f}%")
-                send_telegram_message(close_message)
+                    print(f"⚠️  TIME EXIT: Position already closed ({actual_pos_size:.4f})")
 
         # === EXIT LONG ===
         if self.position_size > 0:
@@ -360,7 +393,7 @@ class ChandelierExit:
             candles_held = self.bar_count - self.entry_bar_count
 
             if candles_held >= min_hold_candles:
-                if (self.sell_signal and in_profit) or (not self.is_uptrend and in_profit):
+                if self.sell_signal or (not self.is_uptrend and in_profit):
                     # Avoid division by zero if entry_price is 0
                     if self.entry_price > 0:
                         final_pl_pct = ((current_price - self.entry_price) / self.entry_price) * (1 if self.position_size > 0 else -1) * 100
@@ -369,6 +402,8 @@ class ChandelierExit:
                     close_roostoo_position(pair=self.symbol, side="SELL")
                     self.position_size = 0
                     self.has_order = False
+                    # 🔒 COOLDOWN: Wait 2 candles (30 min) before allowing re-entry
+                    self._exit_cooldown = 1
                     self.long_stop_prev = None
                     self.short_stop_prev = None
                     self.dir = 0
@@ -408,6 +443,8 @@ class ChandelierExit:
                     close_roostoo_position(pair=self.symbol, side="BUY")
                     self.position_size = 0
                     self.has_order = False
+                    # 🔒 COOLDOWN: Wait 2 candles (30 min) before allowing re-entry
+                    self._exit_cooldown = 1
                     self.long_stop_prev = None
                     self.short_stop_prev = None
                     self.dir = 0
@@ -430,10 +467,15 @@ class ChandelierExit:
                     print(f"⏳ {self.symbol}: CE exit signal ignored (held {candles_held}/{min_hold_candles} candles)")
 
         # === ENTRY RULES (only if no position) ===
+        # 🔒 DECREMENT COOLDOWN: Reduce cooldown counter each candle
+        if self._exit_cooldown > 0:
+            self._exit_cooldown -= 1
+            print(f"⏳ Entry cooldown: {self._exit_cooldown} candles remaining")
+        
         # 🔒 CRITICAL: Use FRESH data (not cache) for entry check
         # Cache can be stale after recent trade entry, causing duplicate entries
-        if not self.check_has_open_position(use_fresh_data=True):
-            # Position confirmed closed - proceed with entry logic
+        if not self.check_has_open_position(use_fresh_data=True) and self._exit_cooldown == 0:
+            # Position confirmed closed AND cooldown expired - proceed with entry logic
             # Use CACHED balance (fetched once per candle for all traders)
             # This prevents 429 errors from 25 traders checking balance simultaneously
             if is_balance_cache_ready():
@@ -744,6 +786,12 @@ class ChandelierExit:
                 # 🔒 CRITICAL: Always get current position size (needed for both TP ladder and SL check)
                 current_pos_size, _ = get_roostoo_position(pair=self.symbol)
 
+                # 🔍 DEBUG: Log every iteration to verify monitoring is running
+                if self.bar_count % 10 == 0:  # Every ~20 seconds
+                    print(f"🔍 TP/SL Monitor Check | {self.symbol} | Price: ${current_price:.4f} | Entry: ${self.entry_price:.4f} | P&L: {current_pl_pct:+.2f}%")
+                    print(f"   TP Ladder Enabled: {TP_SL_ENABLED} | Levels: {len(self.tp_ladder_levels)} | Original Size: {self.original_position_size:.4f}")
+                    print(f"   Current Pos Size: {current_pos_size:.4f} | _highest_tp_reached: {self._highest_tp_reached}")
+
                 # ===== TRAILING TP LADDER LOGIC (MARKET ORDERS) =====
                 # Track highest TP level reached
                 # When price reverses below that level, SELL IMMEDIATELY with MARKET order
@@ -758,6 +806,9 @@ class ChandelierExit:
                     highest_crossed_level = None
                     highest_crossed_idx = -1
 
+                    # 🔍 DEBUG: Show what we're checking
+                    print(f"🔍 Checking TP Levels | Price: ${current_price:.4f} | Entry: ${self.entry_price:.4f}")
+                    
                     for i, tp_level_pct in enumerate(self.tp_ladder_levels):
                         tp_price_level = self.entry_price * (1 + tp_level_pct)
 
@@ -767,6 +818,7 @@ class ChandelierExit:
                             if tp_level_pct not in self.tp_ladder_orders or not self.tp_ladder_orders[tp_level_pct].get('tracked', False):
                                 highest_crossed_level = tp_level_pct
                                 highest_crossed_idx = i
+                                print(f"   ✅ Level {i+1} (+{tp_level_pct*100:.0f}%) crossed! ${tp_price_level:.4f}")
 
                     # If a new level was crossed, track it
                     if highest_crossed_level is not None:
@@ -845,6 +897,8 @@ class ChandelierExit:
                                     with self.tp_sl_lock:
                                         self.has_order = False
                                         self.position_size = 0
+                                        # 🔒 COOLDOWN: Wait 2 candles (30 min) before allowing re-entry
+                                        self._exit_cooldown = 1
                                     self.tp_ladder_orders.clear()
                                     break
                                 else:
@@ -1018,6 +1072,8 @@ class ChandelierExit:
 
         self.position_size = 0
         self.has_order = False
+        # 🔒 COOLDOWN: Wait 2 candles (30 min) before allowing re-entry
+        self._exit_cooldown = 1
         self.long_stop_prev = None
         self.short_stop_prev = None
         self.dir = 0
