@@ -1,4 +1,5 @@
-# 🏆 Quant Trading Bot - Hackathon Submission
+# 🏆 Team41 SmashCoins
+# Quant Trading Bot - Hackathon Submission
 
 ## 📋 Executive Summary
 
@@ -249,7 +250,7 @@ The model uses a comprehensive feature set across multiple categories:
 │     └─→ Optimize weighting via cross-validation          │
 │                                                             │
 │  7. MODEL EXPORT                                           │
-│     └─→ Save as .rm (Roostoo Model) format               │
+│     └─→ Save as .pkl (Roostoo Model) format               │
 │                                                             │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -619,35 +620,6 @@ Every 15 Minutes (Candle Close):
 ```
 
 ---
-
-## 📊 Performance Metrics
-
-### Key Performance Indicators (KPIs)
-
-| Metric | Description | Target |
-|--------|-------------|--------|
-| **Win Rate** | % of profitable trades | > 55% |
-| **Avg P&L** | Average profit/loss per trade | > 0.5% |
-| **Sharpe Ratio** | Risk-adjusted returns | > 1.5 |
-| **Max Drawdown** | Largest peak-to-trough decline | < 15% |
-| **Profit Factor** | Gross profit / Gross loss | > 1.5 |
-| **Avg Hold Time** | Average trade duration | 1-3 hours |
-| **Trades/Day** | Trading frequency | 10-30 |
-
----
-
-### ML Model Performance Metrics
-
-| Metric | Description | Typical Range |
-|--------|-------------|---------------|
-| **Accuracy** | % correct class predictions | 45-60% |
-| **Precision (Class 1+)** | % of breakout predictions that succeed | 55-65% |
-| **Recall (Class 1+)** | % of actual breakouts detected | 60-70% |
-| **AUC-ROC** | Area under ROC curve | 0.60-0.70 |
-| **Calibration** | Predicted vs actual probability | ±5% |
-
----
-
 ## 🔧 Configuration & Deployment
 
 ### Environment Variables
@@ -753,8 +725,6 @@ Project File/
 
 ## 📈 Dashboard Features
 
-### Web Interface (http://localhost:5000)
-
 #### Tabs:
 1. **📊 Overview** - Portfolio summary, total P&L, win rate
 2. **💰 Coins** - Live status of all 25 traders with ML probabilities
@@ -818,62 +788,6 @@ Project File/
    ⭐ Best: SOL (+1.85%)
    🔻 Worst: DOGE (-0.52%)
    ```
-
----
-
-## 🧪 Testing & Validation
-
-### Backtesting Framework
-
-```python
-# Historical backtesting on 3+ years of data
-# Walk-forward validation
-# Out-of-sample testing
-
-Metrics Tracked:
-- Cumulative P&L
-- Win rate by coin
-- Win rate by ML class
-- Avg hold time
-- Max drawdown
-- Sharpe ratio
-```
-
-### Paper Trading Mode
-
-```python
-# Run with ML_ENABLED=False to test CE-only strategy
-# Run with small position sizes to validate execution
-# Monitor Telegram alerts for signal quality
-```
-
----
-
-## 🚀 Deployment Options
-
-### Local Development
-```bash
-pip install -r requirements.txt
-python main.py
-# Dashboard: http://localhost:5000
-```
-
-### AWS EC2 Production
-```bash
-# Ubuntu 22.04 EC2 instance
-# Docker containerization available
-# Systemd service for auto-start
-# CloudWatch logging
-```
-
-### High Availability
-```
-- Multi-AZ deployment recommended
-- RDS for database (instead of SQLite)
-- S3 backup for ML models
-- Auto-scaling for high load
-```
-
 ---
 
 ## 📚 References & Inspiration
@@ -889,31 +803,21 @@ python main.py
 
 ---
 
-## 👥 Team & Contributions
+## 👥 Team41 SmashCoins & Contributions
 
-**Solo Developer Project** - Designed, developed, and deployed by a single quantitative developer with expertise in:
+**Teammates:**
+- Jack POON HKUST Computer Science & Mathematics [www.linkedin.com/in/kahangpoon](https://www.linkedin.com/in/kahangpoon/)
+- Cadel TSOI HKU Computer Engineering [www.linkedin.com/in/hoi-wang-tsoi](https://www.linkedin.com/in/hoi-wang-tsoi-34812033a/)
+- Ivan SIT HKUST Biotechnology https://www.linkedin.com/in/chak-hong-sit
+- Jacky LIN HKUST Computer Science 
+
+
+**Team Developer Project** - Designed, developed, and deployed by quantitative developers with expertise in:
 - Machine Learning (LightGBM, XGBoost, scikit-learn)
 - Algorithmic Trading (Technical Analysis, Risk Management)
 - Software Engineering (Python, Async Programming, REST APIs)
 - DevOps (AWS, Docker, CI/CD)
 
----
-
-## 📞 Contact & Support
-
-**GitHub Repository:** [Your GitHub Link]  
-**Documentation:** See `/docs` folder for detailed guides  
-**Issues:** Open GitHub issues for bugs or feature requests  
-
----
-
-## ⚠️ Disclaimer
-
-This trading bot is provided for **educational and research purposes** only. Past performance does not guarantee future results. Cryptocurrency trading involves substantial risk of loss. Always test thoroughly in a simulated environment before deploying real capital.
-
-**Not financial advice. Use at your own risk.**
-
----
 
 ## 📄 License
 
